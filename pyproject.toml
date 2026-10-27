@@ -1,0 +1,48 @@
+[project]
+name = "quadruped-lab"
+version = "0.1.0"
+description = "基于 MjLab 的四足机器人任务开发项目"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "mjlab==1.6.0",
+    "rsl-rl-lib==5.4.2",
+    "tensordict>=0.7.0",
+    "torch==2.14.1",
+    "torchvision==0.29.1",
+]
+
+[project.optional-dependencies]
+cpu = ["torch==2.14.1", "torchvision==0.29.1"]
+cu130 = ["torch==2.14.1", "torchvision==0.29.1"]
+
+[tool.uv]
+package = false
+required-version = ">=0.8.0"
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+conflicts = [[{ extra = "cpu" }, { extra = "cu130" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu130", extra = "cu130" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu130", extra = "cu130" },
+]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

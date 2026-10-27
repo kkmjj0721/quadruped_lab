@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.artifacts/
+build/
+dist/
+outputs/
+/logs/
+MUJOCO_LOG.TXT
+
+# 本地测试文件与产物
+/tests/
+
+# 本地开发工作流、设计与审查记录
+/docs/DEVELOPMENT_WORKFLOW.md
+/docs/COLLABORATION_REVIEW.md
+/docs/design/
+/docs/review/
