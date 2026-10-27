@@ -1,6 +1,6 @@
 # quadruped_lab
 
-基于 MjLab 的四足机器人项目，提供基础 PPO 和 Go2 SuperMimic＋CTS-MoE 任务。
+基于 MjLab 的四足机器人项目，提供基础 PPO 和 Go2 SuperMimic 盲速度跟踪任务。SuperMimic 默认采用单 MLP 策略与可微世界模型。
 
 ## 安装
 
@@ -12,14 +12,14 @@
 
 ## Go2 SuperMimic 训练
 
-通过统一训练入口启动粗糙地形任务：
+通过统一训练入口启动平地速度跟踪：
 
 ```bash
-uv run --no-sync python scripts/train.py Unitree-Go2-SuperMimic-Rough \
+uv run --no-sync python scripts/train.py Unitree-Go2-SuperMimic-Flat \
   --device cuda:0 --num-envs 64 --max-iterations 1000
 ```
 
-平地使用 `Unitree-Go2-SuperMimic-Flat`，CPU 使用 `--device cpu`，环境数量至少为2。
+粗糙地形使用 `Unitree-Go2-SuperMimic-Rough`，CPU 使用 `--device cpu`，环境数量至少为2。
 默认执行模型与策略更新；配置覆盖、仅模型训练、检查点续训及验证范围见
 [SuperMimic任务说明](docs/go2_supermimic.md)。
 

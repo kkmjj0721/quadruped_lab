@@ -1,15 +1,22 @@
 # Copyright (c) 2026-2027 zh
-"""内容：提供盲 MoE actor、特权 critic 和带输入／残差归一化的动力学模型。"""
+"""内容：提供历史 MLP 及带归一化的价值和动力学网络。"""
 
 from __future__ import annotations
 
 import torch
 from torch import Tensor, nn
-from torch.nn import functional as F
 
 from ..interfaces import TaskState
-from ..models.encoders import make_mlp
-from ..models.moe import StudentMoEEncoder
+
+
+def make_mlp(input_dim, hidden_dims, output_dim):
+    """隐藏层使用 ELU，输出层保持线性。"""
+    layers, width = [], input_dim
+    for hidden_width in hidden_dims:
+        layers.extend((nn.Linear(width, hidden_width), nn.ELU()))
+        width = hidden_width
+    layers.append(nn.Linear(width, output_dim))
+    return nn.Sequential(*layers)
 
 
 class RunningNorm(nn.Module):
@@ -43,42 +50,39 @@ class RunningNorm(nn.Module):
         return values * (self.var.sqrt() + 1e-6) + self.mean
 
 
-class Go2MoEEncoder(StudentMoEEncoder):
-    """保持 go2_rl_gym 的默认 L2 epsilon，不改变旧 CTS 编码器。"""
+class ReferenceActor(nn.Module):
+    """完整历史经固定排列和归一化后直接进入参考实现的 ELU MLP。"""
 
-    def forward(self, history: Tensor) -> tuple[Tensor, Tensor]:
-        weights = self.routing_weights(history)
-        mixed = (weights.unsqueeze(-1) * self.expert_outputs(history)).sum(dim=1)
-        return F.normalize(mixed, dim=-1, eps=1e-12), weights
-
-
-class MoEActor(nn.Module):
-    """仅接收本体历史，采用 go2_rl_gym 的 latent 在前、当前帧在后结构。"""
-
-    def __init__(self, spec, config):
+    def __init__(self, spec, config, observation_term_dims):
         super().__init__()
+        if (not observation_term_dims or any(not isinstance(width, int) or isinstance(width, bool) or width < 1
+                                            for width in observation_term_dims)
+                or sum(observation_term_dims) != spec.observation_dim):
+            raise ValueError("Observation term widths must be positive integers summing to observation_dim")
         self.observation_dim = spec.observation_dim
         self.history_length = spec.history_length
         self.action_dim = spec.action_dim
-        self.action_limit = config.action_limit
-        self.normalizer = RunningNorm(spec.observation_dim)
-        self.encoder = Go2MoEEncoder(spec.observation_dim * spec.history_length, spec.latent_dim, config.moe_hidden)
-        self.actor = make_mlp(spec.latent_dim + spec.observation_dim, config.actor_hidden, spec.action_dim)
+        indices, offset = [], 0
+        for width in observation_term_dims:
+            indices.extend(frame * self.observation_dim + offset + column
+                           for frame in range(self.history_length) for column in range(width))
+            offset += width
+        self.register_buffer("history_indices", torch.tensor(indices, dtype=torch.long))
+        self.normalizer = RunningNorm(self.observation_dim * self.history_length)
+        self.actor = make_mlp(self.observation_dim * self.history_length, config.actor_hidden, self.action_dim)
 
-    def action_and_gates(self, history: Tensor) -> tuple[Tensor, Tensor]:
-        frames = history.reshape(-1, self.history_length, self.observation_dim)
-        normalized = self.normalizer(frames)
-        latent, gates = self.encoder(normalized)
-        raw = self.actor(torch.cat((latent, normalized[:, -1]), dim=-1))
-        limit = self.action_limit
-        return (raw if limit is None else limit * torch.tanh(raw / limit)), gates
+    def ordered_history(self, history: Tensor) -> Tensor:
+        """外部保持按帧排列；网络内部按观测项排列，各项历史均为旧到新。"""
+        return history.reshape(-1, self.observation_dim * self.history_length).index_select(1, self.history_indices)
 
     def forward(self, history: Tensor) -> Tensor:
-        return self.action_and_gates(history)[0]
+        return self.actor(self.normalizer(self.ordered_history(history)))
 
-    def student_action(self, observation: Tensor, history: Tensor) -> Tensor:
-        """兼容已有盲策略播放接口；当前帧已包含在历史末尾。"""
-        return self(history)
+
+
+def make_actor(spec, config, observation_term_dims=None):
+    """根据任务声明的历史布局装配唯一的 MLP 策略。"""
+    return ReferenceActor(spec, config, observation_term_dims)
 
 
 class Critic(nn.Module):
@@ -112,21 +116,25 @@ class WorldModel(nn.Module):
         self.input_norm.update(self.task.model_input(state, action))
         self.output_norm.update(self.task.model_target(state, target))
 
-    def forward(self, state: TaskState, action: Tensor) -> TaskState:
-        delta = self.output_norm.unnormalize(self.net(self.input_norm(self.task.model_input(state, action))))
+    def forward(self, state: TaskState, action: Tensor, recorded_current: TaskState | None = None) -> TaskState:
+        inputs = (self.task.model_input(state, action) if recorded_current is None
+                  else self.task.supervised_model_input(state, action, recorded_current))
+        delta = self.output_norm.unnormalize(self.net(self.input_norm(inputs)))
         physical = self.task.integrate(state, action, delta)
         return self.task.advance(state, action, physical)
 
     def loss(self, window) -> Tensor:
         current = window.initial
+        recorded_current = window.initial
         scale = self.output_norm.var.sqrt() + 1e-6
         total = current.physical.new_zeros(())
         for step in range(window.actions.shape[1]):
             target = window.targets.index((slice(None), step))
             action = window.actions[:, step]
-            predicted = self(current, action)
-            error = (self.task.model_target(current, predicted) - self.task.model_target(current, target)) / scale
+            predicted = self(current, action, recorded_current)
+            error = self.task.model_error(current, predicted, target, recorded_current) / scale
             total = total + (error.square().mean(-1) * window.valid[:, step]).sum()
             # 本协议的记忆只含记录动作与外生计时，按日志恢复命令重采样；物理状态始终回喂预测。
             current = TaskState(predicted.physical, target.memory, target.command, target.context)
+            recorded_current = target
         return total / window.valid.sum().clamp_min(1)

@@ -21,17 +21,15 @@ import torch
 from mjlab.utils.torch import configure_torch_backends
 
 from agents.supermimic.single.config import SingleExecutionConfig
-from src.config.go2.go2_supermimic_config import Go2SuperMimicCfg
 
 from ..config.loading import (
-    _merge_mapping, apply_settings as _apply_settings, read_settings as _read_settings,
-    restore_legacy_control_settings as _restore_legacy_control_settings,
-    configuration_for_settings, is_single_actor_config,
+    apply_settings as _apply_settings, read_settings as _read_settings,
+    configuration_for_settings,
 )
-from ..config.rl_cfg import unitree_go2_supermimic_runner_cfg
 from ..config.train_cfg import SuperMimicTrainConfig, TASK_MODES
 from ..go_supermimic_env_cfg import validate_config
 from .runner import make_go2_supermimic_runner
+from .single_runner import algorithm_config
 
 
 # ---------- 参数与任务配置 ----------
@@ -86,8 +84,6 @@ def _resolve_task_config(task_id: str, args: SuperMimicTrainConfig):
         sections = set(cfg.to_dict()) - {"init_member_classes", "to_dict"}
         # 完整快照可能主动删去地形家族等字典键，恢复时不得补回默认内容。
         complete = snapshot or sections.issubset(settings)
-        if sections.issubset(settings) and not is_single_actor_config(cfg):
-            _restore_legacy_control_settings(cfg, settings)
         _apply_settings(cfg, settings, replace_mappings=complete)
     if resume is not None and cfg.terrain.mode != TASK_MODES[task_id]:
         raise ValueError("Resume task terrain mode differs from the saved configuration")
@@ -105,12 +101,7 @@ def _resolve_task_config(task_id: str, args: SuperMimicTrainConfig):
     _integer(cfg.env.num_envs, 2, "Task environment count")
     _integer(cfg.env.seed, 0, "Task seed")
     validate_config(cfg)
-    if is_single_actor_config(cfg):
-        from dataclasses import fields
-        from agents.supermimic.single.config import SingleConfig
-        SingleConfig(**{field.name: getattr(cfg.single, field.name) for field in fields(SingleConfig)})
-    else:
-        unitree_go2_supermimic_runner_cfg(cfg)
+    algorithm_config(cfg)
     return cfg, resume, source
 
 
@@ -168,15 +159,12 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     print(f"[INFO] Logging experiment in directory: {log_dir}", flush=True)
     print(f"[INFO] Training with: task={task_id}, device={device}, seed={cfg.env.seed}", flush=True)
     print(f"[INFO] Control updates enabled: {cfg.runner.enable_control_updates}", flush=True)
-    execution_options = {}
-    if is_single_actor_config(cfg):
-        execution = SingleExecutionConfig(imag_microbatch=args.imag_microbatch, critic_microbatch=args.critic_microbatch)
-        execution_options["execution"] = execution
-        print(f"[INFO] Single MoE training: envs={cfg.env.num_envs}, "
-              f"wm_batch={cfg.single.wm_batch}, imag_batch={cfg.single.imag_batch}, "
-              f"replay={cfg.single.replay_capacity}, compile={cfg.single.compile_imagination}, "
-              f"imag_microbatch={execution.imag_microbatch}, critic_microbatch={execution.critic_microbatch}", flush=True)
-    runner = make_go2_supermimic_runner(cfg, device=device, log_dir=log_dir, **execution_options)
+    execution = SingleExecutionConfig(imag_microbatch=args.imag_microbatch, critic_microbatch=args.critic_microbatch)
+    print(f"[INFO] SuperMimic {cfg.algorithm} training: envs={cfg.env.num_envs}, "
+          f"wm_batch={cfg.single.wm_batch}, imag_batch={cfg.single.imag_batch}, "
+          f"replay={cfg.single.replay_capacity}, compile={cfg.single.compile_imagination}, "
+          f"imag_microbatch={execution.imag_microbatch}, critic_microbatch={execution.critic_microbatch}", flush=True)
+    runner = make_go2_supermimic_runner(cfg, device=device, log_dir=log_dir, execution=execution)
     try:
         if resume is not None:
             print(f"[INFO] Loading model checkpoint from: {resume}", flush=True)

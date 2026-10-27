@@ -12,8 +12,7 @@ import torch
 from mjlab.utils.wrappers import VideoRecorder
 
 from agents.supermimic.interfaces import append_history
-from src.config.go2.go2_supermimic_config import Go2SuperMimicCfg
-from src.config.go2.go2_single_supermimic_config import Go2SingleActorCfg
+from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
 from ..config.train_cfg import TASK_MODES
 from .checkpoints import build_playback_policy, load_playback_source
@@ -21,7 +20,7 @@ from .transition_adapter import make_go2_supermimic_env
 
 
 class SuperMimicVideoRecorder(VideoRecorder):
-    """显式转发学生观测，避免继承的原生manager读取绕过历史适配。"""
+    """显式转发盲策略观测，避免继承的原生manager读取绕过历史适配。"""
 
     def get_observations(self):
         return self._wrapped_env.get_observations()
@@ -100,13 +99,13 @@ def _restore_curriculum(adapter, checkpoint):
 
 def make_playback(task_id, *, checkpoint_file=None, agent="trained", num_envs=None, device="cpu",
                   render_mode=None, video_height=None, video_width=None, no_terminations=False):
-    """返回已重置的播放环境与确定性学生策略，不创建训练组件。"""
+    """返回已重置的播放环境与确定性盲策略策略，不创建训练组件。"""
     if task_id not in TASK_MODES:
         raise ValueError(f"Unknown Go2 SuperMimic task: {task_id}")
     if agent not in ("trained", "zero", "random"):
         raise ValueError(f"Unsupported agent mode: {agent}")
     source = load_playback_source(task_id, checkpoint_file) if agent == "trained" else None
-    cfg = deepcopy(source.cfg) if source is not None else Go2SingleActorCfg()
+    cfg = deepcopy(source.cfg) if source is not None else Go2ReferenceCfg()
     cfg.terrain.mode = TASK_MODES[task_id]
     cfg.env.num_envs = num_envs if num_envs is not None else 1
     torch.manual_seed(cfg.env.seed)
@@ -124,7 +123,7 @@ def make_playback(task_id, *, checkpoint_file=None, agent="trained", num_envs=No
         @torch.no_grad()
         def policy(observations):
             if model is not None:
-                return model.student_action(observations["observation"], observations["history"])
+                return model(observations["history"])
             shape = (adapter.num_envs, adapter.task.spec.action_dim)
             if agent == "zero":
                 return torch.zeros(shape, device=adapter.device)

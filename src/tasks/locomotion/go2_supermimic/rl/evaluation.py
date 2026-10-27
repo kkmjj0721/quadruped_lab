@@ -1,7 +1,7 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    分命令评估学生、教师与零动作，记录真实终态跟踪、首次回合存活和部署对拍。
+    分命令评估单策略与零动作，记录真实终态跟踪、首次回合存活和部署对拍。
 """
 
 from __future__ import annotations
@@ -12,12 +12,7 @@ import re
 
 import torch
 
-from agents.supermimic.interfaces import PolicyInput
-
-from ..mdp.state_spec import ANGULAR_VELOCITY, LINEAR_VELOCITY, QUATERNION, quat_apply_inverse
-from .checkpoints import build_playback_policy, load_playback_source
 from .playback import make_playback
-from ..config.loading import is_single_actor_config
 
 
 def _finite_metrics(value):
@@ -30,32 +25,25 @@ def _finite_metrics(value):
 
 
 @torch.no_grad()
-def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="student", device="cpu", num_envs=32,
+def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="actor", device="cpu", num_envs=32,
                     seconds=20.0) -> dict:
-    """固定四组命令；三分支均使用检查点配置、相同初始种子及播放历史维护。"""
-    if branch not in ("actor", "student", "teacher", "zero"):
-        raise ValueError("Evaluation branch must be actor, student, teacher or zero")
+    """固定四组命令；两分支均使用检查点配置、相同初始种子及播放历史维护。"""
+    if branch not in ("actor", "zero"):
+        raise ValueError("Evaluation branch must be actor or zero")
     if isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs < 4:
         raise ValueError("Evaluation requires at least four environments for four command groups")
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("Evaluation duration must be positive and finite")
     checkpoint = Path(checkpoint).expanduser().resolve()
-    env, student = make_playback(task_id, checkpoint_file=checkpoint, num_envs=num_envs, device=device)
+    env, actor = make_playback(task_id, checkpoint_file=checkpoint, num_envs=num_envs, device=device)
     try:
-        if is_single_actor_config(env.adapter.cfg):
-            if branch == "teacher":
-                raise ValueError("Single-actor checkpoints do not contain a teacher policy")
-            if branch == "student":
-                branch = "actor"
-        teacher = (build_playback_policy(load_playback_source(task_id, checkpoint), env.adapter)
-                   if branch == "teacher" else None)
         device = env.adapter.device
         commands = torch.tensor(((.5, 0., 0.), (-.5, 0., 0.), (0., .5, 0.), (0., 0., .5)), device=device)
         command_names = ("forward", "backward", "lateral", "yaw")
         groups = torch.arange(num_envs, device=device) % 4
         fixed_commands = commands[groups]
         env.adapter.set_play_commands(fixed_commands)
-        # 教师构造也会消耗随机数；在所有组件就绪后统一重置物理初态。
+        # 在所有组件就绪后统一重置物理初态。
         torch.manual_seed(env.adapter.cfg.env.seed)
         observations = env.reset()
         count = math.ceil(seconds / env.adapter.step_dt)
@@ -64,7 +52,7 @@ def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="student", d
         parity = None
         if exported is not None and exported.is_file():
             deployed = torch.jit.load(str(exported), map_location="cpu")
-            expected = student(observations).cpu()
+            expected = actor(observations).cpu()
             actual = deployed(observations["history"].flatten(1).cpu())
             torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-4)
             parity = float((actual - expected).abs().max())
@@ -78,21 +66,15 @@ def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="student", d
         timeout_counts = failure_counts.clone()
         action_max = 0.0
         for step in range(count):
-            if teacher is not None:
-                state = env.adapter.get_state()
-                data = PolicyInput(state, observations["observation"], observations["history"],
-                                   env.adapter.task.privileged(state), torch.ones(num_envs, device=device, dtype=torch.bool))
-                actions = teacher.act(data)
-            elif branch == "zero":
+            if branch == "zero":
                 actions = torch.zeros(num_envs, env.adapter.task.spec.action_dim, device=device)
             else:
-                actions = student(observations)
+                actions = actor(observations)
             if not torch.isfinite(actions).all():
                 raise FloatingPointError("Evaluation policy produced non-finite actions")
             observations, reward, terminated, truncated, info = env.step(actions)
             final = info["final_state"]
-            velocity = quat_apply_inverse(final.physical[:, QUATERNION], final.physical[:, LINEAR_VELOCITY])
-            measured = torch.cat((velocity[:, :2], final.physical[:, ANGULAR_VELOCITY][:, 2:3]), dim=-1)
+            measured = env.adapter.task.tracking_velocity(final)
             velocity_sum += measured.double()
             linear_square += (measured[:, :2] - fixed_commands[:, :2]).double().square().sum(-1)
             yaw_square += (measured[:, 2] - fixed_commands[:, 2]).double().square()
@@ -127,10 +109,11 @@ def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="student", d
 
         result = {
             "checkpoint": str(checkpoint), "task_id": task_id, "branch": branch, "device": str(device),
-            "seed": env.adapter.cfg.env.seed, "control_steps": count, "commands_body": commands.tolist(),
+            "seed": env.adapter.cfg.env.seed, "control_steps": count, "commands": commands.tolist(),
+            "command_frame": "heading_xy_world_yaw",
             "duration_seconds": count * env.adapter.step_dt, "zero_action": branch == "zero",
             **summarize(torch.ones(num_envs, device=device, dtype=torch.bool)),
-            "per_command": {name: {"command_body": commands[index].tolist(), **summarize(groups == index)}
+            "per_command": {name: {"command": commands[index].tolist(), **summarize(groups == index)}
                             for index, name in enumerate(command_names)},
             "falls_per_environment_minute": int(failure_counts.sum()) / (num_envs * count * env.adapter.step_dt / 60),
             "action_abs_max": action_max, "command_rms": float(fixed_commands.square().sum(-1).mean().sqrt()),
@@ -141,13 +124,3 @@ def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="student", d
         return result
     finally:
         env.close()
-
-
-def evaluate_student(task_id: str, checkpoint: str | Path, *, device="cpu", num_envs=32, seconds=20.0,
-                     zero_action=False, branch="student") -> dict:
-    """兼容原学生评估入口；新调用方通过branch明确选择学生、教师或零动作。"""
-    if zero_action:
-        if branch != "student":
-            raise ValueError("zero_action cannot be combined with an explicit nonstudent branch")
-        branch = "zero"
-    return evaluate_policy(task_id, checkpoint, branch=branch, device=device, num_envs=num_envs, seconds=seconds)

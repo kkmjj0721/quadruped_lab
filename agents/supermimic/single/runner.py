@@ -18,7 +18,7 @@ from ..interfaces import append_history
 from ..logging import TrainingLogger
 from .config import SingleConfig, SingleExecutionConfig
 from .learner import Learner
-from .models import Critic, MoEActor, WorldModel
+from .models import Critic, WorldModel, make_actor
 from .replay import Replay, Window, WindowArchive
 
 
@@ -56,7 +56,7 @@ class SingleRunner:
             raise ValueError("OU exploration requires explore_theta * control_dt < 2")
         if cfg.replay_capacity < self.spec.history_length + cfg.wm_window - 1:
             raise ValueError("Replay capacity cannot fit the model window and observation history")
-        self.actor = MoEActor(self.spec, cfg).to(self.device)
+        self.actor = make_actor(self.spec, cfg, self.task.observation_term_dims).to(self.device)
         self.policy = self.actor
         self.model = WorldModel(self.task, cfg.wm_hidden).to(self.device)
         self.critic = Critic(self.spec.privileged_dim, cfg.critic_hidden).to(self.device)
@@ -126,7 +126,6 @@ class SingleRunner:
         timeout_count = torch.zeros((), device=self.device)
         for _ in range(steps):
             observation = self.history[:, -1]
-            self.actor.normalizer.update(observation)
             action = self.actor(self.history)
             noise = cfg.action_noise * torch.randn_like(action)
             if self.exploration_count:
@@ -136,11 +135,10 @@ class SingleRunner:
                                                      * torch.randn_like(action[:count]))
                 noise[:count] = self.ou_noise[:count]
             action = action + noise
-            if cfg.action_limit is not None:
-                action = action.clamp(-cfg.action_limit, cfg.action_limit)
             if not torch.isfinite(action).all():
                 raise FloatingPointError("Collected actions are non-finite")
             result = self.env.step(action)
+            self.actor.normalizer.update(self.actor.ordered_history(self.history))
             self.replay.add(self.current, observation, action, result, self.ages)
             self.model.update_stats(self.current, action, result.final_state)
             done = result.terminated | result.truncated
@@ -174,10 +172,7 @@ class SingleRunner:
         return metrics
 
     def _priority(self, windows):
-        if hasattr(self.task, "replay_priority"):
-            scores = self.task.replay_priority(windows)
-        else:
-            scores = (windows.terminated & windows.valid).float().sum(-1)
+        scores = self.task.replay_priority(windows)
         if scores.shape != windows.valid.shape[:1] or not torch.isfinite(scores).all() or (scores < 0).any():
             raise ValueError("Replay priority must be a finite nonnegative score per window")
         return scores
@@ -193,7 +188,7 @@ class SingleRunner:
             scores = self._priority(candidates)
             chosen = (scores + 1e-3 * torch.rand_like(scores)).topk(prioritized).indices
             parts.append(candidates.index(chosen))
-            worthy = self.task.archive_worthy(candidates) if hasattr(self.task, "archive_worthy") else scores > 0
+            worthy = self.task.archive_worthy(candidates)
             if worthy.shape != scores.shape or worthy.dtype != torch.bool:
                 raise ValueError("Archive eligibility must be a boolean mask per window")
             keep = worthy & (torch.rand_like(scores) < cfg.archive_keep_prob)
@@ -289,7 +284,7 @@ class SingleRunner:
     def save(self, path):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"format": "supermimic_single_moe_v1", "spec": asdict(self.spec), "spec_hash": self.spec.hash,
+        data = {"format": self.spec.model_id, "spec": asdict(self.spec), "spec_hash": self.spec.hash,
                 "config": asdict(self.config), "control_enabled": self.control_enabled,
                 "actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "world_model": self.model.state_dict(),
                 "learner": self.learner.state_dict(), "iteration": self.iteration, "real_steps": self.real_steps,
@@ -303,7 +298,7 @@ class SingleRunner:
 
     def load(self, path):
         data = torch.load(path, map_location=self.device, weights_only=False)
-        if data.get("format") != "supermimic_single_moe_v1" or data.get("spec_hash") != self.spec.hash:
+        if data.get("format") != self.spec.model_id or data.get("spec_hash") != self.spec.hash:
             raise ValueError("Single-actor checkpoint format or task specification mismatch")
         if data.get("spec") != asdict(self.spec) or data.get("config") != asdict(self.config):
             raise ValueError("Single-actor checkpoint configuration mismatch")

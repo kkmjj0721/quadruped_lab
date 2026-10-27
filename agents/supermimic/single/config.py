@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：声明单一 MoE actor 的参考训练预算和显式资源覆盖参数。"""
+"""内容：声明单一历史 MLP 的参考训练预算和显式资源覆盖参数。"""
 
 from dataclasses import dataclass
 import math
@@ -36,7 +36,6 @@ class SingleConfig:
     gamma: float = 0.99
     lam: float = 0.95
     actor_hidden: tuple[int, ...] = (512, 256, 128)
-    moe_hidden: tuple[int, ...] = (512, 256, 256)
     critic_hidden: tuple[int, ...] = (512, 256, 128)
     learning_rate: float = 2e-4
     actor_lr_scale: float = 1.0
@@ -49,7 +48,6 @@ class SingleConfig:
     grad_clip_element: float = 0.1
     compile_imagination: bool = True
     compile_backend: str = "inductor"
-    action_limit: float | None = 1.0
     action_noise: float = 0.1
     explore_frac: float = 0.25
     explore_noise: float = 0.3
@@ -70,7 +68,7 @@ class SingleConfig:
             minimum = 1 if name in positive else 0
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
                 raise ValueError(f"{name} must be an integer >= {minimum}")
-        for name in ("wm_hidden", "actor_hidden", "moe_hidden", "critic_hidden"):
+        for name in ("wm_hidden", "actor_hidden", "critic_hidden"):
             values = tuple(getattr(self, name))
             if not values or any(isinstance(x, bool) or not isinstance(x, int) or x < 1 for x in values):
                 raise ValueError(f"{name} must contain positive integer widths")
@@ -88,8 +86,6 @@ class SingleConfig:
         for name in ("action_noise", "explore_noise", "collapse_falls"):
             if isinstance(getattr(self, name), bool) or not math.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
-        if self.action_limit is not None and (isinstance(self.action_limit, bool) or not math.isfinite(self.action_limit) or self.action_limit <= 0):
-            raise ValueError("action_limit must be finite and positive, or None")
         if not isinstance(self.compile_imagination, bool) or not isinstance(self.compile_backend, str) or not self.compile_backend:
             raise ValueError("Invalid compilation settings")
 

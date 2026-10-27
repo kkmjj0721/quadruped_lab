@@ -63,7 +63,6 @@ def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -
     model_ready = not bool(values.get("model_not_ready", 0))
     control_available = model_ready and values.get("control_enabled", 1) != 0
     model_available = model_ready and values.get("wm_skipped", 0) < 1
-    student_available = control_available and values.get("student/skipped", 0) < 1
     learning_keys = ("timing/world_model_seconds", "timing/control_seconds")
     learning_time = f"{sum(values[key] for key in learning_keys):.3f}s" if all(key in values for key in learning_keys) else "n/a"
     collection_time = number("timing/collection_seconds", decimals=3)
@@ -81,7 +80,6 @@ def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -
         ("Mean world model loss", "wm_loss", model_available),
         ("Mean value loss", "critic_loss", control_available),
         ("Mean control loss", "control_loss", control_available),
-        ("Mean student loss", "student/loss", student_available),
     ):
         if available and key in values:
             lines.append(row(label, number(key)))
@@ -91,8 +89,6 @@ def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -
         if key in values:
             lines.append(row(label, number(key, decimals=2)))
     for label, key, count in (
-        ("Metrics/teacher_episode_return", "episode/teacher_return_mean", False),
-        ("Metrics/student_episode_return", "episode/student_return_mean", False),
         ("Metrics/failures", "failures", True), ("Metrics/timeouts", "timeouts", True),
         ("Metrics/terrain_level", "task/terrain_level", False),
     ):

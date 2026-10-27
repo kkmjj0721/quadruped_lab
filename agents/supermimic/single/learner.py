@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：更新物理模型、直接优化 MoE actor，并拟合固定想象价值目标。"""
+"""内容：更新物理模型、直接优化历史策略，并拟合固定想象价值目标。"""
 
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -97,16 +97,14 @@ class Learner:
                 (loss * weight).backward()
                 feature_batches.append(data.features[:, :-1].flatten(0, 1).detach())
                 target_batches.append(targets.flatten().detach())
-                routing = data.gates.clamp_min(1e-12)
                 values = {"control_loss": loss.detach(), "imagination/survival_h": data.survival.detach().mean(),
                           "imagination/discounted_reward": data.discounted_reward.detach().mean(),
                           "imagination/bootstrap": data.bootstrap.detach().mean(),
-                          "imagination/reward": data.rewards.mean(),
-                          "moe/gate_entropy": -(routing * routing.log()).sum(-1).mean()}
+                          "imagination/reward": data.rewards.mean()}
                 for name, value in values.items():
                     metrics[name] = metrics.get(name, 0) + value * weight
                 # 下段前释放已反传的计算图，只保留价值监督需要的脱离梯度张量。
-                del data, targets, loss, routing, values, part
+                del data, targets, loss, values, part
             gradient = clip_gradients(self.actor.parameters(), cfg.grad_clip, cfg.grad_clip_element)
             self.actor_optimizer.step()
         self.actor_updates += 1

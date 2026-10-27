@@ -15,15 +15,12 @@ from ..config.env_cfgs import (
     resolve_go2_supermimic_cfg, unitree_go2_flat_env_cfg, unitree_go2_rough_env_cfg,
 )
 from ..mdp.curriculums import CommandCurriculum, TerrainCurriculum
-from ..mdp.observations import physical_observation
 from ..mdp.state_spec import (
     ACTION_DIM, COMMAND_TIMER, CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION,
-    ANGULAR_VELOCITY, CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY, JOINT_NAMES,
-    LINEAR_VELOCITY, QUATERNION, REWARD_AUXILIARY, heading, quat_apply_inverse,
+    CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY, JOINT_NAMES,
 )
-from ..mdp.task_model import Go2TaskModel
-from ..mdp.single_task import Go2SingleTaskModel
-from ..mdp.reward_sensors import collect_reward_auxiliary
+from ..mdp.reference_task import Go2ReferenceTaskModel
+from ..mdp.reference_state import CONTEXT_COM
 from ..mdp.terrains import PlaneSurface, TerrainMap, TerrainSurface
 
 
@@ -39,7 +36,6 @@ class Go2TransitionAdapter:
     def __init__(self, cfg=None, *, device="cpu", play=False, render_mode=None,
                  video_height=None, video_width=None, no_terminations=False):
         self.cfg = resolve_go2_supermimic_cfg(cfg, play=play)
-        self.single_actor = getattr(self.cfg, "algorithm", "cts") == "single_moe"
         self.play = play
         self.no_terminations = no_terminations
         self.map = TerrainMap(self.cfg.terrain)
@@ -65,9 +61,9 @@ class Go2TransitionAdapter:
             self.map.bind(terrain.terrain_origins)
             self.surface = (PlaneSurface(device=self.device) if self.cfg.terrain.mode == "flat" else
                             TerrainSurface.from_model(self.raw_env.sim.mj_model, self.device, terrain_map=self.map))
-            task_type = Go2SingleTaskModel if self.single_actor else Go2TaskModel
-            self.task = task_type(self.cfg, self.robot.data.default_joint_pos[0].clone(),
+            self.task = Go2ReferenceTaskModel(self.cfg, self.robot.data.default_joint_pos[0].clone(),
                                   self.robot.data.soft_joint_pos_limits[0].clone(), self.surface, device=self.device)
+            self.task.bind_env(self.raw_env)
             self.command_curriculum = CommandCurriculum(self.cfg.commands, self.map.family_names, self.device)
             self.terrain_curriculum = TerrainCurriculum(
                 self.map, self.num_envs, self.cfg.terrain.max_init_level, enabled=self.cfg.terrain.curriculum,
@@ -85,7 +81,7 @@ class Go2TransitionAdapter:
         return self.raw_env.step_dt
 
     def get_state(self):
-        """提供当前决策态的独立副本，避免评估或教师推理修改采集状态。"""
+        """提供当前决策态的独立副本，避免评估修改采集状态。"""
         if self._state is None:
             raise RuntimeError("Reset the Go2 adapter before reading its state")
         return self._state.detached_clone()
@@ -121,7 +117,12 @@ class Go2TransitionAdapter:
     def _context(self, ids):
         context = torch.zeros((ids.numel(), CONTEXT_DIM), dtype=torch.float32, device=self.device)
         foot = self.raw_env.sim.mj_model.geom("robot/FL_foot_collision").id
-        context[:, CONTEXT_FRICTION] = float(self.raw_env.sim.mj_model.geom_friction[foot, 0])
+        friction = self.raw_env.sim.model.geom_friction
+        context[:, CONTEXT_FRICTION] = (friction[ids, foot, 0] if friction.ndim == 3 else friction[foot, 0])
+        base = self.raw_env.sim.mj_model.body("robot/base").id
+        ipos = self.raw_env.sim.model.body_ipos
+        nominal = torch.as_tensor(self.raw_env.sim.mj_model.body_ipos[base].copy(), device=self.device)
+        context[:, CONTEXT_COM] = (ipos[ids, base] if ipos.ndim == 3 else ipos[base]) - nominal
         context[:, CONTEXT_ENCODER_BIAS] = self.robot.data.encoder_bias[ids]
         context[:, CONTEXT_ORIGIN] = self.raw_env.scene.env_origins[ids]
         bounds, probability = self.command_curriculum.parameters(self.terrain_curriculum.family_ids[ids])
@@ -132,7 +133,7 @@ class Go2TransitionAdapter:
     def _reset_rows(self, ids):
         self._set_origins(ids)
         self.raw_env.reset(env_ids=ids)
-        physical = physical_observation(self.raw_env)
+        physical = self.task.read_physical(self.raw_env)
         context = self._context(ids)
         command, remaining = self.task.sample_commands(context)
         if self._play_commands is not None:
@@ -173,26 +174,23 @@ class Go2TransitionAdapter:
         before = self._state.detached_clone()
         versions = self.context_version.clone()
         _, _, _, raw_truncated, _ = self.raw_env.step(actions)
-        physical = physical_observation(self.raw_env).clone()
+        physical = self.task.read_physical(self.raw_env).clone()
         if not torch.isfinite(physical).all():
             raise FloatingPointError("Go2 physical state contains non-finite values")
         final = self.task.advance(before, actions, physical).detached_clone()
         if self._play_commands is not None:
             final.command.copy_(self._play_commands)
-        # 在任何部分重置之前复制传感器奖励和接触计时，作为世界模型监督标签。
-        if not self.single_actor:
-            final.memory[:, REWARD_AUXILIARY] = collect_reward_auxiliary(self.raw_env, before, final, self.task)
         terminated = (torch.zeros(self.num_envs, dtype=torch.bool, device=self.device) if self.no_terminations
                       else self.task.hard_termination(final))
         truncated = raw_truncated.clone()
         terms = self.task.reward_terms(before, actions, final, terminated.float())
         reward = (self.step_dt * sum(getattr(self.cfg.reward.scales, name) * value
                                      for name, value in terms.items())).detach().clone()
-        velocity = quat_apply_inverse(final.physical[:, QUATERNION], final.physical[:, LINEAR_VELOCITY])
+        velocity = self.task.tracking_velocity(final)
+        yaw = self.task.yaw(before)
         linear_error = velocity[:, :2] - before.command[:, :2]
-        angular_error = final.physical[:, ANGULAR_VELOCITY][:, 2] - before.command[:, 2]
-        # 命令在机体系；累计位移使用动作前航向，不把事后转向应用到历史命令。
-        yaw = heading(before.physical[:, QUATERNION])
+        angular_error = velocity[:, 2] - before.command[:, 2]
+        # 命令在航向坐标系；累计位移使用动作前航向，不把事后转向应用到历史命令。
         vx, vy = before.command[:, 0], before.command[:, 1]
         world_velocity = torch.stack((yaw.cos() * vx - yaw.sin() * vy, yaw.sin() * vx + yaw.cos() * vy), -1)
         self.terrain_curriculum.observe(self.task.world_position(final)[:, :2], world_velocity, self.step_dt)
@@ -210,8 +208,6 @@ class Go2TransitionAdapter:
                                  tracking_angular_mse=angular_error.square().mean(),
                                  action_rms=actions.square().mean().sqrt(),
                                  base_height=self.task.physical_features(final)[:, 0].mean())
-        if not self.single_actor:
-            self.last_metrics = {name: float(value) for name, value in self.last_metrics.items()}
         return EnvStep(final, self._state.detached_clone(), reward, terminated, truncated, versions)
 
     # ---------- 课程持久化与资源释放 ----------

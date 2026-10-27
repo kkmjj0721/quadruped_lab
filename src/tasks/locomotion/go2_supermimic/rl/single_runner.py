@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：装配单一盲MoE训练器，持久化Go2课程与任务配置，并导出部署策略。"""
+"""内容：装配单一盲策略训练器，持久化Go2课程与任务配置，并导出部署策略。"""
 
 from dataclasses import fields
 import hashlib
@@ -12,7 +12,7 @@ import torch
 from agents.supermimic.single.config import SingleConfig
 from agents.supermimic.single.runner import SingleRunner
 from agents.supermimic.single.export import export_policy
-from src.config.go2.go2_single_supermimic_config import Go2SingleActorCfg
+from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
 from ..mdp.state_spec import JOINT_NAMES
 from .transition_adapter import make_go2_supermimic_env
@@ -59,28 +59,29 @@ class Go2SingleActorRunner(SingleRunner):
     def _deployment_metadata(self):
         control = self.env.cfg.control
         return {
-            "spec_hash": self.spec.hash, "algorithm": "single_moe",
+            "spec_hash": self.spec.hash, "algorithm": "single_mlp",
             "observation_layout": [
                 {"name": "base_angular_velocity_body", "width": 3},
                 {"name": "projected_gravity_body", "width": 3},
-                {"name": "velocity_command_body", "width": 3},
-                {"name": "joint_position_offset", "width": 12},
+                {"name": "joint_position_offset_with_encoder_bias", "width": 12},
                 {"name": "joint_velocity", "width": 12},
                 {"name": "previous_unscaled_action", "width": 12},
+                {"name": "velocity_command_heading_xy_world_yaw", "width": 3},
             ],
             "joint_names": list(JOINT_NAMES), "action_joint_names": list(JOINT_NAMES),
             "default_joint_positions": self.env.task.default_joint_pos.detach().cpu().tolist(),
-            "action_scales": [control.action_scale * (control.hip_reduction if "_hip_" in name else 1.0)
-                              for name in JOINT_NAMES],
+            "action_scales": [control.action_scales[name] for _ in range(4) for name in ("hip", "thigh", "calf")],
             "joint_target_formula": "default_joint_positions + actions * action_scales",
+            "joint_target_coordinate": "encoder",
+            "simulation_physical_target_formula": "default_joint_positions + actions * action_scales - encoder_bias",
             "control_dt_seconds": float(self.env.step_dt),
-            "observation_semantics": "blind_proprioception_and_velocity_command",
-            "latent_source": "go2_rl_gym_dense_eight_expert_history_encoder",
+            "observation_semantics": "blind_proprioception_and_heading_velocity_command",
+            "reference_commit": "d9eee9b3f248e5300e636c433255db2c1c3e086a",
         }
 
 
 def make_single_actor_runner(cfg=None, *, device="cpu", log_dir=None, execution=None):
-    cfg = cfg if cfg is not None else Go2SingleActorCfg()
+    cfg = cfg if cfg is not None else Go2ReferenceCfg()
     config = algorithm_config(cfg)
     torch.manual_seed(cfg.env.seed)
     env = make_go2_supermimic_env(cfg, device=device)

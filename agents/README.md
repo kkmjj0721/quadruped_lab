@@ -14,7 +14,7 @@ agents/
 │   ├── utils.py      # 类与观测组配置解析
 │   ├── LICENSE
 │   └── NOTICE.md
-├── supermimic/       # 世界模型、CTS-MoE、连续回放与BPTT学习
+├── supermimic/       # 世界模型、连续回放与BPTT学习，single/提供默认单MLP策略
 └── __init__.py
 ```
 
@@ -90,37 +90,6 @@ uv run --no-sync python -B -m unittest discover -s tests/test_agents -v
 
 测试在 CPU 合成环境验证采样、GAE、参数更新和检查点读写，不证明机器人训练收敛。来源、许可与适配范围见 [基础 PPO 说明](base/NOTICE.md)。
 
-## SuperMimic＋CTS-MoE
+## SuperMimic 单 MLP
 
-`agents.supermimic`实现世界模型自回归拟合、教师／八专家学生闭环想象、共享动作网络／critic、学生表征监督与外层调度。来源及与原论文的差异见[NOTICE](supermimic/NOTICE.md)，任务语义与验收见[迁移设计](../docs/design/go2_blind_supermimic.md#12-算法层实施契约2026-10-26)。
-
-装配需要实现`interfaces.py`的`TaskModel`和`CollectionEnv`。前者提供可微物理特征／积分、记忆与命令推进、观测、特权、奖励及归一化状态误差；后者必须返回reset前复制的`final_state`与reset后的`next_state`。`AlgorithmSpec.semantic_id`必须覆盖坐标、布局、动作缩放、时间步与任务语义，修改这些含义须升级标识；所有Tensor使用同设备float32，标志bool，episode／step／context版本int64。
-
-```python
-from agents.supermimic import (
-    ActorCritic, DynamicsModel, LearnerConfig, RunnerConfig,
-    SuperMimicLearner, SuperMimicRunner, WorldModelTrainer,
-)
-
-# task与env由具体任务提供，并共享同一设备。
-policy = ActorCritic(task.spec).to(env.device)
-world_model = DynamicsModel(task).to(env.device)
-learner = SuperMimicLearner(policy, world_model, LearnerConfig())
-trainer = WorldModelTrainer(world_model)
-runner = SuperMimicRunner(env, learner, trainer, RunnerConfig(), log_dir="logs/supermimic/run")
-runner.learn(1)
-```
-
-默认`enable_control_updates=False`仅采集和拟合模型。通过任务侧的留出预测／物理梯度验收后，显式设置`RunnerConfig(enable_control_updates=True)`，也可传`control_gate(metrics)`控制是否执行策略更新；算法不会根据训练误差自行认定物理导数可靠。教师比例与分支损失权重分别配置；控制只更新共享actor与教师encoder，学生只通过真实学生状态的latent监督更新。想象冻结模型、critic和学生参数，但保留输入导数。
-
-回放不保存逐转移完整历史，采样时恢复同回合前缀；环形覆盖丢失前缀的起点拒采。失败与超时均截断真实窗口，超时不作为失败标签。`runner.save/load`保存模型、四个优化器、RMS、spec、分组、计数和RNG，格式明确为**参数续训**；加载后reset仿真、清空回放并重新预热，不保证与连续训练逐步等价。`get_inference_policy()`接收`(observation, history)`，仅执行学生，调用者维护旧→新且包含当前帧的历史；reset时重复首帧。
-
-```bash
-# 常规CPU行为检查，不自动执行显式训练冒烟。
-.venv/bin/python -B -m unittest discover -s tests/test_agents -v
-
-# 默认完整CTS-MoE网络的合成训练／参数续训，预算180秒。
-RUN_SUPERMIMIC_TRAINING=1 timeout 180 .venv/bin/python -B -m unittest tests.test_training.test_supermimic_training -v
-```
-
-Go2的`TaskModel`、真实仿真adapter及runner装配工厂已提供，见[Go2任务说明](../docs/go2_supermimic.md)；命令行训练入口尚未新增。算法合成冒烟产物位于`.artifacts/supermimic/training-smoke/`，不证明Go2收敛、部署或性能优势；真实Go2轻量验证的范围在任务说明中单独维护。
+默认 Go2 任务使用 `agents.supermimic.single`：指定 Go2 参考仓库的完整历史 ELU MLP、SiLU 世界模型和短时域 BPTT。无教师或蒸馏，部署输入只有本体历史和速度命令。配置与训练、播放、验证入口统一见 [Go2任务说明](../docs/go2_supermimic.md)，来源与迁移差异见 [single/NOTICE.md](supermimic/single/NOTICE.md)。

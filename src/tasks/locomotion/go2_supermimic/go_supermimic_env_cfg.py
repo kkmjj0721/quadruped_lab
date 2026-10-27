@@ -12,26 +12,23 @@ from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers import SceneEntityCfg, TerminationTermCfg
 from mjlab.managers.event_manager import EventTermCfg
-from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.scene import SceneCfg
-from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.viewer import ViewerConfig
 
-from src.assets.robots import get_go2_robot_cfg
-from src.config.go2.go2_supermimic_config import Go2SuperMimicCfg
+from src.assets.robots.go2_reference import get_reference_go2_robot_cfg
+from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
-from .mdp.observations import physical_observation
 from .mdp.state_spec import FOOT_NAMES
 from .mdp.terrains import TerrainMap
 
 
-def validate_config(cfg: Go2SuperMimicCfg) -> None:
-    """拒绝尚未建模的执行器时序及不一致的任务参数。"""
-    if cfg.control.delay_min_lag != 0 or cfg.control.delay_max_lag != 0:
-        raise ValueError("SuperMimic v2 requires zero actuator delay")
+def validate_config(cfg: Go2ReferenceCfg) -> None:
+    """在构造仿真前统一校验任务入口参数。"""
+    if cfg.algorithm != "single_mlp":
+        raise ValueError("SuperMimic requires the single_mlp algorithm")
     if cfg.commands.heading_command:
-        raise ValueError("SuperMimic v2 requires direct yaw-rate commands")
+        raise ValueError("SuperMimic requires direct yaw-rate commands")
     if isinstance(cfg.env.num_envs, bool) or not isinstance(cfg.env.num_envs, int) or cfg.env.num_envs < 1:
         raise ValueError("Environment count must be a positive integer")
     if not math.isfinite(cfg.env.episode_length_s) or cfg.env.episode_length_s <= 0:
@@ -41,76 +38,39 @@ def validate_config(cfg: Go2SuperMimicCfg) -> None:
     if isinstance(cfg.control.decimation, bool) or not isinstance(cfg.control.decimation, int) or cfg.control.decimation < 1:
         raise ValueError("Control decimation must be a positive integer")
     if cfg.env.num_obs_history != 5:
-        raise ValueError("The Go2 student requires exactly five history frames")
+        raise ValueError("The Go2 actor requires exactly five history frames")
     if cfg.terrain.mode not in ("flat", "rough"):
         raise ValueError("Unsupported SuperMimic terrain mode")
 
 
 def make_go2_supermimic_env_cfg(
-    cfg: Go2SuperMimicCfg | None = None, *, terrain_map: TerrainMap | None = None,
+    cfg: Go2ReferenceCfg | None = None, *, terrain_map: TerrainMap | None = None,
 ) -> ManagerBasedRlEnvCfg:
     """返回可直接构造MjLab环境的配置，不复用任何PPO任务内部实现。"""
-    cfg = deepcopy(cfg) if cfg is not None else Go2SuperMimicCfg()
+    cfg = deepcopy(cfg) if cfg is not None else Go2ReferenceCfg()
     validate_config(cfg)
     terrain_map = terrain_map if terrain_map is not None else TerrainMap(cfg.terrain)
 
-    # ---------- 场景与传感器 ----------
+    # ---------- 场景 ----------
 
     feet = tuple(f"{leg}_foot_collision" for leg in FOOT_NAMES)
-    contact = ContactSensorCfg(
-        name="feet_ground_contact",
-        primary=ContactMatch(mode="geom", entity="robot", pattern=feet),
-        secondary=ContactMatch(mode="body", pattern="terrain"),
-        fields=("found", "force"),
-        reduce="netforce",
-        num_slots=1,
-        track_air_time=True,
-    )
-    # 自碰历史覆盖本控制周期的全部物理子步，保持参考奖励的计数语义。
-    leg_contact = ContactSensorCfg(
-        name="leg_ground_contact",
-        primary=ContactMatch(mode="geom", entity="robot", pattern=r"^(FR|FL|RR|RL)_(hip|thigh|calf).*_collision$"),
-        secondary=ContactMatch(mode="body", pattern="terrain"),
-        fields=("found", "force"), reduce="none", num_slots=1, history_length=1,
-    )
-    self_contact = ContactSensorCfg(
-        name="self_collision_contact",
-        primary=ContactMatch(mode="geom", entity="robot", pattern=r".*_collision$"),
-        secondary=ContactMatch(mode="subtree", entity="robot", pattern="base_link"),
-        fields=("found", "force"), reduce="maxforce", num_slots=1,
-        history_length=cfg.control.decimation, secondary_policy="error",
-    )
     scene = SceneCfg(
-        entities={"robot": get_go2_robot_cfg(cfg)},
+        entities={"robot": get_reference_go2_robot_cfg(cfg)},
         terrain=terrain_map.entity_cfg(),
-        sensors=(() if getattr(cfg, "algorithm", "cts") == "single_moe" else (contact, leg_contact, self_contact)),
+        sensors=(),
         num_envs=cfg.env.num_envs,
         extent=cfg.env.scene_extent,
     )
 
-    # ---------- 观测 ----------
-
-    # 物理环境只输出真值；本体帧、特权观测与历史由本任务MDP和算法runner生成。
-    observations = {
-        "state": ObservationGroupCfg(
-            terms={"physical": ObservationTermCfg(func=physical_observation)},
-            enable_corruption=False,
-            concatenate_terms=True,
-        ),
-    }
-
     # ---------- 动作 ----------
 
+    action_scales = {rf".*_{name}_joint": value for name, value in cfg.control.action_scales.items()}
     actions = {
         "joint_pos": JointPositionActionCfg(
             entity_name="robot",
             actuator_names=(".*",),
             use_default_offset=True,
-            scale={
-                r".*_hip_joint": cfg.control.action_scale * cfg.control.hip_reduction,
-                r".*_thigh_joint": cfg.control.action_scale,
-                r".*_calf_joint": cfg.control.action_scale,
-            },
+            scale=action_scales,
         ),
     }
 
@@ -133,10 +93,26 @@ def make_go2_supermimic_env_cfg(
             },
         ),
     }
+    if cfg.domain_randomization.enabled:
+        domain = cfg.domain_randomization
+        events.update({
+            "foot_friction": EventTermCfg(func=envs_mdp.dr.geom_friction, mode="startup", params={
+                "asset_cfg": SceneEntityCfg("robot", geom_names=feet), "operation": "abs",
+                "distribution": "uniform", "ranges": tuple(domain.friction_range),
+                "axes": [0], "shared_random": True,
+            }),
+            "encoder_bias": EventTermCfg(func=envs_mdp.dr.encoder_bias, mode="startup", params={
+                "asset_cfg": SceneEntityCfg("robot"), "bias_range": tuple(domain.encoder_bias_range),
+            }),
+            "base_com": EventTermCfg(func=envs_mdp.dr.body_com_offset, mode="startup", params={
+                "asset_cfg": SceneEntityCfg("robot", body_names=("base",)), "operation": "add",
+                "ranges": {axis: tuple(domain.com_range[name]) for axis, name in enumerate(("x", "y", "z"))},
+            }),
+        })
 
     # ---------- 终止与任务逻辑边界 ----------
 
-    # 原生环境只判定超时；跌倒等失败由mdp/terminations.py在reset前统一计算。
+    # 原生环境只判定超时；跌倒等失败由任务模型在reset前统一计算。
     terminations = {"time_out": TerminationTermCfg(func=envs_mdp.time_out, time_out=True)}
     # 命令、奖励与课程使用本任务TaskModel和adapter，真实／想象共用同一套实现。
     # 保持这些manager为空，防止原生环境重复推进任务或使用另一套奖励。
@@ -150,7 +126,6 @@ def make_go2_supermimic_env_cfg(
     sim = SimulationCfg(
         nconmax=cfg.sim.nconmax,
         njmax=cfg.sim.njmax,
-        contact_sensor_maxmatch=cfg.sim.contact_sensor_maxmatch,
         broadphase=cfg.sim.broadphase,
         mujoco=MujocoCfg(
             timestep=cfg.sim.timestep,
@@ -158,12 +133,14 @@ def make_go2_supermimic_env_cfg(
             iterations=cfg.sim.iterations,
             ls_iterations=cfg.sim.ls_iterations,
             ccd_iterations=cfg.sim.ccd_iterations,
+            impratio=10,
+            cone="elliptic",
         ),
     )
     viewer = ViewerConfig(
         origin_type=ViewerConfig.OriginType.ASSET_BODY,
         entity_name="robot",
-        body_name="base_link",
+        body_name="base",
         distance=cfg.viewer.distance,
         elevation=cfg.viewer.elevation,
         azimuth=cfg.viewer.azimuth,
@@ -173,7 +150,8 @@ def make_go2_supermimic_env_cfg(
 
     return ManagerBasedRlEnvCfg(
         scene=scene,
-        observations=observations,
+        # adapter在真实步进后提取73维状态；本体、特权观测和历史只有任务模型一处定义。
+        observations={},
         actions=actions,
         events=events,
         commands=commands,

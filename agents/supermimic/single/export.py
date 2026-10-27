@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：导出仅含本体归一化、八专家 MoE 与动作 MLP 的独立单策略。"""
+"""内容：导出带历史排列、观测归一化及动作网络的独立单策略。"""
 
 from copy import deepcopy
 import json
@@ -21,17 +21,16 @@ def export_policy(actor, directory, *, iteration: int, metadata=None):
     if (module.normalizer.var < 0).any() or module.normalizer.count <= 0:
         raise ValueError("Invalid policy normalization statistics")
     information = {
-        **(metadata or {}), "format": "supermimic_single_moe_policy_v1", "iteration": iteration,
+        **(metadata or {}), "format": "supermimic_single_mlp_policy_v1",
+        "iteration": iteration,
         "input_name": "obs_history", "output_name": "actions", "dtype": "float32",
         "input_shape": [None, module.history_length * module.observation_dim],
         "output_shape": [None, module.action_dim], "observation_dim": module.observation_dim,
         "history_length": module.history_length, "history_order": "frame_major_oldest_first",
-        "history_reset": "repeat_initial_frame", "num_experts": module.encoder.num_experts,
-        "latent_dim": module.encoder.latent_dim, "actor_input_order": "latent_then_current_observation",
-        "latent_normalization": "L2 after dense mixture, epsilon=1e-12",
+        "history_reset": "repeat_initial_frame",
         "normalization": {"statistics_in_graph": True, "formula": "clamp((x-mean)/(sqrt(var)+1e-6),-10,10)"},
-        "action_semantics": "unscaled_joint_position_offsets", "action_limit": module.action_limit,
-        "action_transform": "identity" if module.action_limit is None else "L*tanh(raw/L)",
+        "action_semantics": "unscaled_joint_position_offsets", "action_transform": "identity",
+        "actor_input_order": "term_major_oldest_first", "history_permutation": module.history_indices.tolist(),
     }
     import onnx
 

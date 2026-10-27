@@ -1,7 +1,7 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    统一读取训练／播放配置快照、覆盖声明字段并恢复旧版控制语义。
+    统一读取训练／播放配置快照、覆盖声明字段并验证声明字段。
 """
 
 from copy import deepcopy
@@ -29,9 +29,6 @@ def apply_settings(target, values: dict, prefix: str = "", *, replace_mappings: 
         if name.startswith("_") or not hasattr(target, name):
             raise ValueError(f"Unknown task configuration field: {path}")
         current = getattr(target, name)
-        if path in ("policy.action_limit", "single.action_limit") and value is None:
-            target.action_limit = None
-            continue
         # 兼容既有BaseConfig快照中的空方法元数据，不覆盖实际实例方法。
         if callable(current):
             if not prefix and name in ("init_member_classes", "to_dict") and value == {}:
@@ -63,17 +60,6 @@ def apply_settings(target, values: dict, prefix: str = "", *, replace_mappings: 
         setattr(target, name, deepcopy(value))
 
 
-def restore_legacy_control_settings(cfg, settings: dict) -> None:
-    """完整旧快照缺字段时保持无界动作和原学习率，不静默应用新保护。"""
-    for section in ("policy", "learner"):
-        if not isinstance(settings.get(section), dict):
-            raise ValueError(f"Configuration section {section} must be an object")
-    if "action_limit" not in settings.get("policy", {}):
-        cfg.policy.action_limit = None
-    if "actor_ramp_updates" not in settings.get("learner", {}):
-        cfg.learner.actor_ramp_updates = 0
-
-
 def read_settings(path: Path) -> tuple[dict, bool]:
     if not path.is_file():
         raise FileNotFoundError(f"Task configuration file not found: {path}")
@@ -91,20 +77,12 @@ def read_settings(path: Path) -> tuple[dict, bool]:
     return settings, "config" in payload
 
 
-def is_single_actor_config(cfg) -> bool:
-    return getattr(cfg, "algorithm", None) == "single_moe"
-
-
 def configuration_for_settings(settings: dict | None = None):
-    """根据明确算法标记或历史配置字段选择格式，避免旧快照混入新默认值。"""
-    from src.config.go2.go2_supermimic_config import Go2SuperMimicCfg
-    from src.config.go2.go2_single_supermimic_config import Go2SingleActorCfg
+    """只接受当前单 MLP 配置；未声明算法时使用同一默认值。"""
+    from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
     settings = settings or {}
-    algorithm = settings.get("algorithm")
-    if algorithm is not None and algorithm != "single_moe":
+    algorithm = settings.get("algorithm", "single_mlp")
+    if algorithm != "single_mlp":
         raise ValueError(f"Unsupported SuperMimic algorithm: {algorithm}")
-    legacy = algorithm is None and any(name in settings for name in ("policy", "model", "learner"))
-    return Go2SuperMimicCfg() if legacy else Go2SingleActorCfg()
-
-
+    return Go2ReferenceCfg()

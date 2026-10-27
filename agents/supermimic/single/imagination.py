@@ -20,7 +20,6 @@ class ImaginedData:
     survival: Tensor
     discounted_reward: Tensor
     bootstrap: Tensor
-    gates: Tensor
 
 
 class Imagination:
@@ -30,34 +29,33 @@ class Imagination:
                      if config.compile_imagination else self._step)
 
     def _step(self, state: TaskState, history: Tensor):
-        action, gates = self.actor.action_and_gates(history)
+        action = self.actor(history)
         with torch.no_grad():
             features = self.task.privileged(state)
         predicted = self.model(state, action)
         failure = self.task.soft_termination(predicted)
         reward = self.task.reward(state, action, predicted, failure)
         frame = self.task.observe(predicted, noisy=True)
-        return predicted, append_history(history, frame), reward, failure, features, gates
+        return predicted, append_history(history, frame), reward, failure, features
 
     def rollout(self, seed) -> ImaginedData:
         cfg = self.config
         state, history = seed.state, seed.history
         survival = torch.ones(history.shape[0], device=history.device)
         discounted = torch.zeros_like(survival)
-        rewards, failures, features, gates = [], [], [], []
+        rewards, failures, features = [], [], []
         for step in range(cfg.horizon):
-            state, history, reward, failure, feature, routing = self.step(state, history)
+            state, history, reward, failure, feature = self.step(state, history)
             discounted = discounted + cfg.gamma ** step * survival * reward
             survival = survival * (1 - failure)
             rewards.append(reward.detach())
             failures.append(failure.detach())
             features.append(feature.detach())
-            gates.append(routing.detach())
         endpoint = self.task.privileged(state)
         bootstrap = cfg.gamma ** cfg.horizon * survival * self.critic(endpoint)
         features.append(endpoint.detach())
         return ImaginedData(discounted + bootstrap, torch.stack(rewards, dim=1), torch.stack(failures, dim=1),
-                            torch.stack(features, dim=1), survival, discounted, bootstrap, torch.stack(gates, dim=1))
+                            torch.stack(features, dim=1), survival, discounted, bootstrap)
 
     @torch.no_grad()
     def lambda_returns(self, data: ImaginedData) -> Tensor:

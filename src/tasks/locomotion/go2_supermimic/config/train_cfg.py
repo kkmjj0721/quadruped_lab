@@ -21,7 +21,7 @@ class SuperMimicTrainConfig:
     device: str = "cuda:0"
     """单个运行设备，例如cpu或cuda:0。"""
     num_envs: int | None = None
-    """覆盖并行环境数量；CTS至少需要两个环境。"""
+    """覆盖并行环境数量；训练至少使用两个并行环境。"""
     seed: int | None = None
     """覆盖任务及网络随机种子。"""
     max_iterations: int = 10000
@@ -31,9 +31,9 @@ class SuperMimicTrainConfig:
     log_interval: int = 1
     """终端分区日志间隔；JSONL仍逐轮保存。"""
     imag_microbatch: int = 256
-    """单MoE想象反传同时处理的种子数；不改变总想象批量。"""
+    """单策略想象反传同时处理的种子数；不改变总想象批量。"""
     critic_microbatch: int = 4096
-    """单MoE每次critic反传的样本数；不改变critic优化器更新次数。"""
+    """单策略每次critic反传的样本数；不改变critic优化器更新次数。"""
     log_root: str = "logs/supermimic"
     experiment_name: str = "go2_supermimic"
     run_name: str = ""
