@@ -49,13 +49,17 @@ class Learner:
         self.critic_updates = 0
         self.lr_multiplier = 1.0
         self.ramp_start = 0
+        self.actor_frozen_until = 0
+        self.policy_start = config.warmup_iterations
 
     def schedule(self, iteration: int):
+        """策略斜率从冻结结束、预热结束和回滚点三者最晚处起算。"""
         cfg = self.config
         progress = min(1.0, iteration / cfg.lr_decay_iterations)
         rate = cfg.learning_rate * (cfg.lr_final_frac + (1 - cfg.lr_final_frac) * .5 * (1 + math.cos(math.pi * progress)))
         rate *= self.lr_multiplier
-        ramp = min(1.0, (self.actor_updates - self.ramp_start + 1) / cfg.actor_ramp_iterations) if cfg.actor_ramp_iterations else 1.0
+        start = max(self.ramp_start, self.actor_frozen_until, self.policy_start)
+        ramp = min(1.0, max(0.0, iteration - start) / max(1, cfg.actor_ramp_iterations))
         for group in self.actor_optimizer.param_groups:
             group["lr"] = rate * cfg.actor_lr_scale * ramp
         for optimizer in (self.model_optimizer, self.critic_optimizer):
@@ -73,7 +77,7 @@ class Learner:
         self.model_updates += 1
         return {"wm_loss": loss.detach(), "wm_grad_norm": gradient.detach(), "wm_valid_steps": window.valid.sum()}
 
-    def improve(self, seed):
+    def improve(self, seed, *, freeze_actor=False):
         cfg = self.config
         batch = seed.history.shape[0]
         if batch < 1:
@@ -84,6 +88,11 @@ class Learner:
         feature_batches, target_batches = [], []
         metrics = {}
         with frozen(self.model, self.critic):
+            # 负载均衡按整个想象批次统计门控使用率，与参考实现的总批量语义一致。
+            balance, usage = self.actor.load_balance_loss(seed.history)
+            if not torch.isfinite(balance):
+                raise FloatingPointError("Load-balance loss is non-finite")
+            (balance * cfg.load_balance_coef).backward()
             for start in range(0, batch, self.execution.imag_microbatch):
                 end = min(start + self.execution.imag_microbatch, batch)
                 weight = (end - start) / batch
@@ -97,7 +106,9 @@ class Learner:
                 (loss * weight).backward()
                 feature_batches.append(data.features[:, :-1].flatten(0, 1).detach())
                 target_batches.append(targets.flatten().detach())
-                values = {"control_loss": loss.detach(), "imagination/survival_h": data.survival.detach().mean(),
+                values = {"control_loss": loss.detach(), "control/load_balance_loss": balance.detach(),
+                          "control/gate_usage_max": usage.detach(),
+                          "imagination/survival_h": data.survival.detach().mean(),
                           "imagination/discounted_reward": data.discounted_reward.detach().mean(),
                           "imagination/bootstrap": data.bootstrap.detach().mean(),
                           "imagination/reward": data.rewards.mean()}
@@ -106,8 +117,11 @@ class Learner:
                 # 下段前释放已反传的计算图，只保留价值监督需要的脱离梯度张量。
                 del data, targets, loss, values, part
             gradient = clip_gradients(self.actor.parameters(), cfg.grad_clip, cfg.grad_clip_element)
-            self.actor_optimizer.step()
-        self.actor_updates += 1
+            if not freeze_actor:
+                self.actor_optimizer.step()
+            del balance, usage
+        if not freeze_actor:
+            self.actor_updates += 1
         features = torch.cat(feature_batches)
         targets = torch.cat(target_batches)
         del feature_batches, target_batches
@@ -144,10 +158,12 @@ class Learner:
         return {"actor": self.actor_optimizer.state_dict(), "model": self.model_optimizer.state_dict(),
                 "critic": self.critic_optimizer.state_dict(), "actor_updates": self.actor_updates,
                 "model_updates": self.model_updates, "critic_updates": self.critic_updates,
-                "lr_multiplier": self.lr_multiplier, "ramp_start": self.ramp_start}
+                "lr_multiplier": self.lr_multiplier, "ramp_start": self.ramp_start,
+                "actor_frozen_until": self.actor_frozen_until, "policy_start": self.policy_start}
 
     def load_state_dict(self, data):
         for name in ("actor", "model", "critic"):
             getattr(self, name + "_optimizer").load_state_dict(data[name])
-        for name in ("actor_updates", "model_updates", "critic_updates", "lr_multiplier", "ramp_start"):
+        for name in ("actor_updates", "model_updates", "critic_updates", "lr_multiplier", "ramp_start",
+                     "actor_frozen_until", "policy_start"):
             setattr(self, name, data[name])

@@ -42,7 +42,11 @@ def _cpu_tree(value):
 
 
 class SingleRunner:
-    """参数续训会重建真实回放和预热，既不恢复仿真状态，也不重置累计迭代。"""
+    """参数续训重建真实回放，不恢复仿真状态、不重置累计迭代，也不重排预热。
+
+    策略更新起点由绝对 ``policy_start`` 与 ``actor_frozen_until`` 决定，与参考实现一致，
+    因此续训不会因重新预热而推迟策略更新。
+    """
 
     def __init__(self, env, config: SingleConfig, log_dir=None, control_enabled=True, execution=None):
         self.env, self.task, self.spec = env, env.task, env.task.spec
@@ -69,7 +73,7 @@ class SingleRunner:
         self.ages = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
         self.ou_noise = torch.zeros(env.num_envs, self.spec.action_dim, device=self.device)
         self.exploration_count = int(env.num_envs * cfg.explore_frac)
-        self.warmup_remaining = cfg.warmup_iterations
+        self.driver = self.expert = self.steer = None
         self.log_dir = Path(log_dir) if log_dir is not None else None
         self.logger = TrainingLogger(self.log_dir, num_envs=env.num_envs, device=self.device)
         self.target_iteration = 0
@@ -80,7 +84,8 @@ class SingleRunner:
         self.completed_episodes = deque(maxlen=100)
         self._safe_policy = None
         self._collapse_strikes = 0
-        self._guard_failures = self._guard_transitions = 0.0
+        self._guard_falls = 0.0
+        self._guard_windows = 0
         if self.log_dir is not None:
             (self.log_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2) + "\n", encoding="utf-8")
             (self.log_dir / "execution.json").write_text(json.dumps(asdict(self.execution), indent=2) + "\n", encoding="utf-8")
@@ -99,6 +104,19 @@ class SingleRunner:
         """任务子类提供设备上的原始／加权指标，算法不硬编码任务奖励。"""
         return {}
 
+    def _override_actions(self, action, history, observation):
+        """任务子类可用外部策略接管部分环境的动作；算法只保留调用位置。"""
+        return action
+
+    def _driver_scale(self):
+        """驱动占比按参考实现从起始值线性衰减到结束值。"""
+        start, end = self.config.driver_fade
+        return min(1.0, max(0.0, (end - self.iteration) / max(1, end - start)))
+
+    def _reset_drivers(self, done):
+        """任务子类在回合结束时清理外部策略状态；默认没有外部策略。"""
+        return None
+
     @torch.no_grad()
     def reset_collection(self):
         self.current = self.env.reset()
@@ -111,7 +129,8 @@ class SingleRunner:
         self.completed_episodes.clear()
         self.replay.clear()
         self.archive.clear()
-        self.warmup_remaining = self.config.warmup_iterations
+        if self.driver is not None or self.expert is not None:
+            self._reset_drivers(torch.ones(self.env.num_envs, dtype=torch.bool, device=self.device))
 
     @torch.no_grad()
     def collect(self, steps):
@@ -126,7 +145,7 @@ class SingleRunner:
         timeout_count = torch.zeros((), device=self.device)
         for _ in range(steps):
             observation = self.history[:, -1]
-            action = self.actor(self.history)
+            action = self._override_actions(self.actor(self.history), self.history, observation)
             noise = cfg.action_noise * torch.randn_like(action)
             if self.exploration_count:
                 count = self.exploration_count
@@ -138,7 +157,7 @@ class SingleRunner:
             if not torch.isfinite(action).all():
                 raise FloatingPointError("Collected actions are non-finite")
             result = self.env.step(action)
-            self.actor.normalizer.update(self.actor.ordered_history(self.history))
+            self.actor.update_statistics(self.history)
             self.replay.add(self.current, observation, action, result, self.ages)
             self.model.update_stats(self.current, action, result.final_state)
             done = result.terminated | result.truncated
@@ -153,6 +172,8 @@ class SingleRunner:
             history = append_history(self.history, frame)
             self.history = torch.where(done[:, None, None], frame[:, None].expand_as(history), history)
             self.ou_noise.masked_fill_(done[:, None], 0)
+            if self.driver is not None or self.expert is not None:
+                self._reset_drivers(done)
             self.ages = torch.where(done, 0, self.ages + 1)
             self.current = result.next_state.detached_clone()
             reward_sum += result.reward.mean()
@@ -197,29 +218,39 @@ class SingleRunner:
             parts.append(self.archive.sample(archived))
         return Window.concatenate(parts) if len(parts) > 1 else parts[0]
 
-    def _collapse_guard(self, metrics, real_delta):
-        self._guard_failures += metrics["failures"]
-        self._guard_transitions += real_delta
+    def _collapse_guard(self, metrics):
+        """模型被利用表现为真实摔倒激增：回滚策略并降低学习率。
+
+        阈值与参考实现一致，使用一个记录窗口内每轮的平均绝对失败行数，
+        而不是按环境分钟归一化的比率。
+        """
         cfg = self.config
+        self._guard_falls += metrics["failures"]
+        self._guard_windows += 1
         if self.iteration % cfg.collapse_interval:
             return
-        rate = self._guard_failures / max(self._guard_transitions * self.task.dt / 60, 1e-9)
-        self._guard_failures = self._guard_transitions = 0.0
-        metrics["guard/falls_per_environment_minute"] = rate
-        eligible = self._safe_policy is not None and self.warmup_remaining == 0 and self.learner.actor_updates > 0
-        self._collapse_strikes = self._collapse_strikes + 1 if eligible and rate > cfg.collapse_falls else 0
+        falls = self._guard_falls / max(self._guard_windows, 1)
+        self._guard_falls, self._guard_windows = 0.0, 0
+        metrics["guard/falls_per_iteration"] = falls
+        eligible = (self._safe_policy is not None and self.iteration > self.learner.actor_frozen_until
+                    and self.learner.actor_updates > 0)
+        if not eligible or falls <= cfg.collapse_falls:
+            self._collapse_strikes = 0
+            return
+        self._collapse_strikes += 1
         if self._collapse_strikes < 2:
             return
         for name in ("actor", "critic"):
             getattr(self, name).load_state_dict(self._safe_policy[name])
-        # 参考实现清除导致发散的优化器动量；模型优化器及累计更新次数保留。
+        # 参考实现保留世界模型：它刚学到导致崩溃的真实样本，重载会让同一策略被再次利用。
         self.learner.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=cfg.learning_rate, betas=(.9, .95))
         self.learner.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=cfg.learning_rate)
         self.learner.lr_multiplier *= .5
-        self.learner.ramp_start = self.learner.actor_updates
+        self.learner.ramp_start = self.iteration
         self._collapse_strikes = 0
         metrics["guard/rollback"] = 1.0
-        print("[WARN] Restored saved actor and critic after repeated physical falls; learning rate reduced", flush=True)
+        print(f"[WARN] Collapse guard: {falls:.1f} falls per iteration, "
+              f"restored saved actor and critic; lr scale {self.learner.lr_multiplier:.3g}", flush=True)
 
     def learn(self, iterations):
         if isinstance(iterations, bool) or not isinstance(iterations, int) or iterations < 1:
@@ -246,12 +277,13 @@ class SingleRunner:
                 metrics.update({key: value / self.config.wm_updates for key, value in model_metrics.items()})
                 self._synchronize()
                 model_time = time.perf_counter() - phase
-                if self.warmup_remaining:
-                    self.warmup_remaining -= 1
-                elif self.control_enabled:
+                if self.control_enabled and self.iteration + 1 > self.learner.policy_start:
                     enabled = True
                     phase = time.perf_counter()
-                    metrics.update(self.learner.improve(self.replay.sample_seeds(self.config.imag_batch)))
+                    frozen = self.iteration + 1 <= self.learner.actor_frozen_until
+                    metrics.update(self.learner.improve(self.replay.sample_seeds(self.config.imag_batch),
+                                                       freeze_actor=frozen))
+                    metrics["control/actor_frozen"] = float(frozen)
                     self.imagined_steps += self.config.horizon * self.config.imag_batch
                     self._synchronize()
                     control_time = time.perf_counter() - phase
@@ -273,7 +305,7 @@ class SingleRunner:
                             "performance/real_collection_fps": delta / max(collection_time, 1e-9),
                             "replay/archive_size": self.archive.size})
             metrics = _numbers(metrics)
-            self._collapse_guard(metrics, delta)
+            self._collapse_guard(metrics)
             self.logger.record(metrics)
             output.append(metrics)
         return output
@@ -322,11 +354,10 @@ class SingleRunner:
         self.current = self.history = None
         self.replay.clear()
         self.archive.clear()
-        self.warmup_remaining = self.config.warmup_iterations
         self.elapsed = 0.0
         self.session_iterations = 0
         self._collapse_strikes = 0
-        self._guard_failures = self._guard_transitions = 0.0
+        self._guard_falls, self._guard_windows = 0.0, 0
         torch.set_rng_state(data["rng"].cpu())
         if self.device.type == "cuda" and data["cuda_rng"] is not None:
             torch.cuda.set_rng_state_all([value.cpu() for value in data["cuda_rng"]])

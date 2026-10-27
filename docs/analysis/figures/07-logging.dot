@@ -1,0 +1,29 @@
+digraph G {
+  graph [rankdir=LR, nodesep=0.24, ranksep=0.40, fontname="Noto Sans CJK SC", fontsize=14,
+         label="图7  指标从任务/算法到终端与 metrics.jsonl 的汇聚路径", labelloc="t"];
+  node [fontname="Noto Sans CJK SC", fontsize=9, shape=box, style="rounded,filled", fillcolor="#eef4fb", color="#3f6fa8"];
+  edge [fontname="Noto Sans CJK SC", fontsize=8, color="#4a4a4a"];
+
+  subgraph cluster_src {
+    label="指标来源"; style="rounded,dashed"; color="#8a8a8a";
+    s1 [label="Go2TransitionAdapter.last_metrics\nreward/<6 项原始率>、terrain_level、command_stage_iteration\ntracking_linear_mse、tracking_angular_mse、action_rms\nbase_height、fast_yaw"];
+    s2 [label="Go2SingleActorRunner._collection_step_metrics\ntask/reward_raw/* 与 task/reward/*（×dt×权重），其余→task/*"];
+    s3 [label="SingleRunner.collect\nreal_reward、failures、timeouts、real_steps_delta\nepisode/return_mean、episode/length_*、driver/*"];
+    s4 [label="Learner / Imagination\nwm_loss、wm_grad_norm、wm_valid_steps\ncontrol_loss、control/load_balance_loss、control/gate_usage_max\ncontrol_grad_norm、critic_loss、imagination/*、execution/*"];
+    s5 [label="SingleRunner.learn 记账\ntiming/*、performance/*、replay/archive_size\n*_updates_total、imagined_steps_total、control/actor_frozen"];
+    s6 [label="_collapse_guard\nguard/falls_per_iteration、guard/rollback"];
+  }
+
+  subgraph cluster_sink {
+    label="输出"; style="rounded,dashed"; color="#8a8a8a";
+    j1 [label="metrics.jsonl：每轮一行完整数值\n_numeric_metrics 拒绝非有限值；allow_nan=False", fillcolor="#fff3e0"];
+    j2 [label="终端：format_training_log 的 80 列分块\n每 log_interval 轮 + 首轮 + 目标末轮", fillcolor="#fff3e0"];
+    j3 [label="config.json / execution.json\ntask_config.json / run_config.json\nsource_manifest.json / sources.zip", fillcolor="#e8f5e9"];
+  }
+
+  s1 -> s2 -> s3;
+  s4 -> s5;
+  s3 -> j1; s5 -> j1; s6 -> j1;
+  j1 -> j2 [label="同一 dict"];
+  s5 -> j3 [style=dashed];
+}

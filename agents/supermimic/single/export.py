@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：导出带历史排列、观测归一化及动作网络的独立单策略。"""
+"""内容：导出含混合专家历史编码器、双路观测归一化及动作网络的独立单策略。"""
 
 from copy import deepcopy
 import json
@@ -12,25 +12,30 @@ import torch
 
 
 def export_policy(actor, directory, *, iteration: int, metadata=None):
-    """每个产物原子替换；部署图不包含世界模型、critic、任务或教师。"""
+    """每个产物原子替换；部署图含历史与当前帧两套归一化，不含世界模型、critic 或任务。"""
     if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
         raise ValueError("Export iteration must be a nonnegative integer")
     module = deepcopy(actor).cpu().eval().requires_grad_(False)
     if any(not torch.isfinite(value).all() for value in module.state_dict().values()):
         raise ValueError("Cannot export non-finite policy tensors")
-    if (module.normalizer.var < 0).any() or module.normalizer.count <= 0:
-        raise ValueError("Invalid policy normalization statistics")
+    for normalizer in module.policy_normalizers():
+        if (normalizer.var < 0).any() or normalizer.count <= 0:
+            raise ValueError("Invalid policy normalization statistics")
     information = {
-        **(metadata or {}), "format": "supermimic_single_mlp_policy_v1",
+        **(metadata or {}), "format": "supermimic_moe_policy_v1",
         "iteration": iteration,
         "input_name": "obs_history", "output_name": "actions", "dtype": "float32",
         "input_shape": [None, module.history_length * module.observation_dim],
         "output_shape": [None, module.action_dim], "observation_dim": module.observation_dim,
-        "history_length": module.history_length, "history_order": "frame_major_oldest_first",
+        "history_length": module.history_length, "history_order": module.history_order,
         "history_reset": "repeat_initial_frame",
-        "normalization": {"statistics_in_graph": True, "formula": "clamp((x-mean)/(sqrt(var)+1e-6),-10,10)"},
+        "normalization": {"statistics_in_graph": True, "split": "history_and_current_frame",
+                          "formula": "clamp((x-mean)/(sqrt(var)+1e-6),-10,10)"},
         "action_semantics": "unscaled_joint_position_offsets", "action_transform": "identity",
-        "actor_input_order": "term_major_oldest_first", "history_permutation": module.history_indices.tolist(),
+        "actor_input_order": module.input_order,
+        "encoder": {"type": "moe", "experts": module.encoder.moe.experts.expert_num,
+                    "latent_dim": module.encoder.moe.experts.output_dim,
+                    "gate_input": "normalized_history"},
     }
     import onnx
 

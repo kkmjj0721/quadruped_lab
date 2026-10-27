@@ -25,8 +25,8 @@ from .mdp.terrains import TerrainMap
 
 def validate_config(cfg: Go2ReferenceCfg) -> None:
     """在构造仿真前统一校验任务入口参数。"""
-    if cfg.algorithm != "single_mlp":
-        raise ValueError("SuperMimic requires the single_mlp algorithm")
+    if cfg.algorithm != "moe_history":
+        raise ValueError("SuperMimic requires the moe_history algorithm")
     if cfg.commands.heading_command:
         raise ValueError("SuperMimic requires direct yaw-rate commands")
     if isinstance(cfg.env.num_envs, bool) or not isinstance(cfg.env.num_envs, int) or cfg.env.num_envs < 1:

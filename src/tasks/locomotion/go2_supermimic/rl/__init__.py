@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：导出 Go2 单 MLP 训练器和真实环境适配器。"""
+"""内容：导出 Go2 混合专家历史策略训练器和真实环境适配器。"""
 
 from .runner import make_go2_supermimic_runner
 from .single_runner import Go2SingleActorRunner

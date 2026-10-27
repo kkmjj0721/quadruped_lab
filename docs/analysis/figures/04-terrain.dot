@@ -1,0 +1,42 @@
+digraph G {
+  graph [rankdir=TB, nodesep=0.22, ranksep=0.34, fontname="Noto Sans CJK SC", fontsize=14,
+         label="图4  粗糙地形：11 族 × 4~5 级的连通地块地图", labelloc="t"];
+  node [fontname="Noto Sans CJK SC", fontsize=9, shape=box, style="rounded,filled", fillcolor="#eef4fb", color="#3f6fa8"];
+  edge [fontname="Noto Sans CJK SC", fontsize=8, color="#4a4a4a"];
+
+  node [shape=plaintext, style="", fontsize=8];
+  grid [label=<
+    <TABLE BORDER="1" CELLBORDER="1" CELLSPACING="0" CELLPADDING="2">
+      <TR><TD COLSPAN="13" BGCOLOR="#eeeeee">外侧 16 m 平地 border（支撑半域 44 m × 68 m，超出即失败）</TD></TR>
+      <TR><TD BGCOLOR="#eeeeee">ring</TD><TD COLSPAN="11" BGCOLOR="#eeeeee">核心 5 行 = 逻辑等级 0…4（同列 = 同家族，纵向即难度阶梯）</TD><TD BGCOLOR="#eeeeee">ring</TD></TR>
+      <TR><TD BGCOLOR="#f5f5f5">r0</TD>
+          <TD BGCOLOR="#e8f5e9">rough l0</TD><TD BGCOLOR="#e3f2fd">st018↑ l0</TD><TD BGCOLOR="#e3f2fd">st018↓ l0</TD><TD BGCOLOR="#e3f2fd">st021↑ l0</TD><TD BGCOLOR="#e3f2fd">st021↓ l0</TD><TD BGCOLOR="#e3f2fd">st025↑ l0</TD><TD BGCOLOR="#e3f2fd">st025↓ l0</TD><TD BGCOLOR="#e3f2fd">st028↑ l0</TD><TD BGCOLOR="#e3f2fd">st028↓ l0</TD><TD BGCOLOR="#fff3e0">slope↑ l0</TD><TD BGCOLOR="#fff3e0">slope↓ l0</TD><TD BGCOLOR="#f5f5f5">r0</TD></TR>
+      <TR><TD BGCOLOR="#f5f5f5">r1</TD>
+          <TD BGCOLOR="#e8f5e9">l1</TD><TD BGCOLOR="#e3f2fd">l1</TD><TD BGCOLOR="#e3f2fd">l1</TD><TD BGCOLOR="#e3f2fd">l1</TD><TD BGCOLOR="#e3f2fd">l1</TD><TD BGCOLOR="#e3f2fd">l1</TD><TD BGCOLOR="#e3f2fd">l1</TD><TD BGCOLOR="#e3f2fd">l1</TD><TD BGCOLOR="#e3f2fd">l1</TD><TD BGCOLOR="#fff3e0">l1</TD><TD BGCOLOR="#fff3e0">l1</TD><TD BGCOLOR="#f5f5f5">r1</TD></TR>
+      <TR><TD BGCOLOR="#f5f5f5">r2</TD>
+          <TD BGCOLOR="#e8f5e9">l2</TD><TD BGCOLOR="#e3f2fd">l2</TD><TD BGCOLOR="#e3f2fd">l2</TD><TD BGCOLOR="#e3f2fd">l2</TD><TD BGCOLOR="#e3f2fd">l2</TD><TD BGCOLOR="#e3f2fd">l2</TD><TD BGCOLOR="#e3f2fd">l2</TD><TD BGCOLOR="#e3f2fd">l2</TD><TD BGCOLOR="#e3f2fd">l2</TD><TD BGCOLOR="#fff3e0">l2</TD><TD BGCOLOR="#fff3e0">l2</TD><TD BGCOLOR="#f5f5f5">r2</TD></TR>
+      <TR><TD BGCOLOR="#f5f5f5">r3</TD>
+          <TD BGCOLOR="#e8f5e9">l3</TD><TD BGCOLOR="#e3f2fd">l3</TD><TD BGCOLOR="#e3f2fd">l3</TD><TD BGCOLOR="#e3f2fd">l3</TD><TD BGCOLOR="#e3f2fd">l3</TD><TD BGCOLOR="#e3f2fd">l3</TD><TD BGCOLOR="#e3f2fd">l3</TD><TD BGCOLOR="#e3f2fd">l3</TD><TD BGCOLOR="#e3f2fd">l3</TD><TD BGCOLOR="#fff3e0">l3</TD><TD BGCOLOR="#fff3e0">l3</TD><TD BGCOLOR="#f5f5f5">r3</TD></TR>
+      <TR><TD BGCOLOR="#f5f5f5">r4</TD>
+          <TD BGCOLOR="#c8e6c9">l3(重复)</TD><TD BGCOLOR="#bbdefb">l4</TD><TD BGCOLOR="#bbdefb">l4</TD><TD BGCOLOR="#bbdefb">l4</TD><TD BGCOLOR="#bbdefb">l4</TD><TD BGCOLOR="#bbdefb">l4</TD><TD BGCOLOR="#bbdefb">l4</TD><TD BGCOLOR="#bbdefb">l4</TD><TD BGCOLOR="#bbdefb">l4</TD><TD BGCOLOR="#ffe0b2">l3(重复)</TD><TD BGCOLOR="#ffe0b2">l3(重复)</TD><TD BGCOLOR="#f5f5f5">r4</TD></TR>
+      <TR><TD BGCOLOR="#f5f5f5">r5–r6</TD><TD COLSPAN="11" BGCOLOR="#f5f5f5">外圈 + 重复最高级行，仅在原生 terrain_levels 可视化元数据里使用</TD><TD BGCOLOR="#f5f5f5">ring</TD></TR>
+    </TABLE>>];
+
+  node [shape=plaintext, style="", fontsize=8];
+  lad [label=<
+    <TABLE BORDER="1" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3">
+      <TR><TD>家族（11 个）</TD><TD>l0</TD><TD>l1</TD><TD>l2</TD><TD>l3</TD><TD>l4</TD><TD>几何参数</TD></TR>
+      <TR><TD>random_rough</TD><TD>0.02</TD><TD>0.03</TD><TD>0.045</TD><TD>0.06</TD><TD>—</TD><TD>高度幅值 m；noise_step 0.005，水平尺度 0.1</TD></TR>
+      <TR><TD>stairs_018/021/025/028 × ↑↓（8 个）</TD><TD>0.05</TD><TD>0.08</TD><TD>0.10</TD><TD>0.12</TD><TD>0.16</TD><TD>台阶高 m；台阶宽 0.18/0.21/0.25/0.28，平台 2.5，无洞</TD></TR>
+      <TR><TD>slope ↑↓（2 个）</TD><TD>0</TD><TD>0.133</TD><TD>0.267</TD><TD>0.40</TD><TD>—</TD><TD>坡度（tan）；平台 2.0，border 0.25</TD></TR>
+    </TABLE>>];
+
+  s1 [label="出生：family_ids = arange(N) % 11（每环境固定一个家族）\nlevels ~ U{0…min(等级数-1, max_init_level)}；默认 max_init_level=0 且 curriculum=False\n→ 训练/播放初始时所有环境都在本家族 l0"];
+  s2 [label="晋级（只在回合结束调用 TerrainCurriculum.complete）：\nup：单回合最远位移 > 地块边长/2 = 4 m → level+1，越过最高级则同族重掷等级\ndown：最远位移 < 0.5 × 应走距离（累计命令位移 + 当前命令×剩余时间）→ level−1，下限 0"];
+  s3 [label="出生点 origins[level + rings, family_id + rings]，每块 8 m×8 m 网格中心\n同时写原生 terrain_levels / terrain_types 仅用于可视化"];
+  f1 [label="可微表面 TerrainSurface：从已编译 mj_model 读取 BOX / HFIELD 碰撞几何按地块分桶\n记录 geometry_hash；查询按 bucket 取 box 顶面最大值与 hfield 三角双线性插值（≤8192 点分块）"];
+
+  grid -> lad [style=invis];
+  lad -> s1 -> s2 -> s3;
+  s3 -> f1 [style=dashed, label="同类几何\n供奖励/扫描/失败判定"];
+}

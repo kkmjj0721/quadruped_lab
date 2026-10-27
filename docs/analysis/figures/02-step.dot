@@ -1,0 +1,23 @@
+digraph step {
+  graph [rankdir=TB, nodesep=0.3, ranksep=0.22, fontname="Noto Sans CJK SC", fontsize=15,
+         label="图2  一次真实控制步的时序（dt = 0.005 s × decimation 4 = 0.02 s，控制频率 50 Hz）", labelloc="t"];
+  node [fontname="Noto Sans CJK SC", fontsize=10, shape=box, style="rounded,filled", fillcolor="#eef4fb", color="#3f6fa8", width=5.6];
+  edge [fontname="Noto Sans CJK SC", fontsize=8, color="#4a4a4a"];
+
+  a0 [label="① 决策态 s_t：physical 73（70 物理状态 + 3 平面位姿 xy/yaw）、memory 14（上一动作 12 + 已历时 + 命令剩余）、command 3、context 26", fillcolor="#e8f5e9"];
+  a1 [label="② 观测：task.observe(s_t) 生成当前帧 45 维；history 保持 5 帧 = 225 维（旧→新，reset 时复制首帧）"];
+  a2 [label="③ 策略：MoeActor(history) → a_t ∈ R^12（无界线性输出，无 tanh/clip）"];
+  a3 [label="④ 探索：a = a_t + ε；前 25% 环境 ε 为 OU 过程，其余 ε ~ N(0, 0.1²)；下发的就是记入历史的动作"];
+  a4 [label="⑤ 物理：raw_env.step(a) 执行 4 个 0.005 s 子步；直流电机（Kp/Kd/effort/armature）+ 0~2 物理步随机延迟"];
+  a5 [label="⑥ 终态：task.read_physical 从仿真读取 70 维状态并拼上位姿 3 维（步长不足时不复制下一回合状态）"];
+  a6 [label="⑦ 任务推进：task.advance 写入实际动作、时钟 +dt、命令计时 −dt；计时归零则按 context 范围重采样命令（10% 站立）"];
+  a7 [label="⑧ 奖励：reference_reward_terms(before, a, final) 得 6 项率，reward = dt × Σ 权重×率（起点命令评价终点状态）"];
+  a8 [label="⑨ 失败：hard_termination = 倾角 > 70°（−g_z > cos70°）或越出地形支持区（边界内缩 1.1 m）；超时来自原生环境"];
+  a9 [label="⑩ 转移：EnvStep(final_state 复制、next_state、reward、terminated、truncated、context_version)"];
+  a10 [label="⑪ 采集侧后处理：Replay.add、RunningNorm.update_statistics、history 追加（done 行改为首帧重复）、指标累加"];
+  a11 [label="⑫ 回合结束：TerrainCurriculum.complete → _reset_rows（重采命令、按等级取地块、context_version+1）→ raw_env.reset", fillcolor="#fff3e0"];
+
+  a0 -> a1 -> a2 -> a3 -> a4 -> a5 -> a6 -> a7 -> a8 -> a9 -> a10 -> a11;
+  a11 -> a0 [style=dashed, label="新回合"];
+  a10 -> a1 [style=dashed, label="下一控制步（未 done 行继续累加历史）", constraint=false];
+}

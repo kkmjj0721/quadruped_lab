@@ -20,7 +20,7 @@ from ..mdp.state_spec import (
     CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY, JOINT_NAMES,
 )
 from ..mdp.reference_task import Go2ReferenceTaskModel
-from ..mdp.reference_state import CONTEXT_COM
+from ..mdp.reference_state import ANGULAR_BODY, CONTEXT_COM
 from ..mdp.terrains import PlaneSurface, TerrainMap, TerrainSurface
 
 
@@ -102,6 +102,23 @@ class Go2TransitionAdapter:
         self._play_commands = values.clone()
         if self._state is not None:
             self._state.command.copy_(self._play_commands)
+
+    def planar_pose(self):
+        """返回各环境机身世界坐标xy与航向，供外部驱动生成追逐命令。"""
+        if self._state is None:
+            raise RuntimeError("Reset the Go2 adapter before reading its pose")
+        return self.task.world_position(self._state)[:, :2], self.task.yaw(self._state)
+
+    @torch.no_grad()
+    def set_commands(self, commands):
+        """按环境写入速度命令，供外部驱动接管命令支路；播放期间以固定命令为准。"""
+        if self._state is None:
+            raise RuntimeError("Reset the Go2 adapter before writing commands")
+        values = torch.as_tensor(commands, dtype=torch.float32, device=self.device)
+        if values.shape != (self.num_envs, 3) or not torch.isfinite(values).all():
+            raise ValueError("Driver commands must be finite [num_envs,3]")
+        if self._play_commands is None:
+            self._state.command.copy_(values)
 
     # ---------- 回合重置 ----------
 
@@ -207,7 +224,9 @@ class Go2TransitionAdapter:
                                  tracking_linear_mse=linear_error.square().sum(-1).mean(),
                                  tracking_angular_mse=angular_error.square().mean(),
                                  action_rms=actions.square().mean().sqrt(),
-                                 base_height=self.task.physical_features(final)[:, 0].mean())
+                                 base_height=self.task.physical_features(final)[:, 0].mean(),
+                                 # 参考 train.py:406 的诊断量：机体系偏航角速度超过 3 rad/s 的比例，用于发现打转。
+                                 fast_yaw=(final.physical[:, ANGULAR_BODY][:, 2].abs() > 3.0).float().mean())
         return EnvStep(final, self._state.detached_clone(), reward, terminated, truncated, versions)
 
     # ---------- 课程持久化与资源释放 ----------

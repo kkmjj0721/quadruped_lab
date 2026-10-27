@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：将指定Go2参考状态、解析速度奖励及真实随机化上下文接入单MLP训练。"""
+"""内容：将指定Go2参考状态、解析速度奖励及真实随机化上下文接入混合专家历史策略训练。"""
 
 from copy import deepcopy
 import hashlib
@@ -62,7 +62,7 @@ class Go2ReferenceTaskModel:
         self.semantic_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         self.spec = AlgorithmSpec(73, 73, 12, 45, 179, 26, 14, 3,
                                   "go2_reference_velocity_v1:" + self.semantic_hash,
-                                  model_id="supermimic_single_mlp_v1")
+                                  model_id="supermimic_moe_v1")
 
     # ---------- 真实状态与坐标 ----------
 

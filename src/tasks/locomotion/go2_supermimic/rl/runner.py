@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：提供 Go2 单 MLP SuperMimic 训练器装配入口。"""
+"""内容：提供 Go2 混合专家历史策略 SuperMimic 训练器装配入口。"""
 
 from .single_runner import make_single_actor_runner
 

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import torch
 
-from agents.supermimic.single.models import ReferenceActor, make_actor
+from agents.supermimic.single.models import MoeActor, make_actor
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
 from ..config.train_cfg import TASK_MODES
@@ -58,7 +58,7 @@ def load_playback_source(task_id: str, checkpoint_file: str | Path) -> PlaybackS
         raise ValueError("Playback task terrain mode differs from the saved configuration")
     # 与训练保持相同的可信文件约定；只把所需策略装配到目标设备。
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    expected_format = "supermimic_single_mlp_v1"
+    expected_format = "supermimic_moe_v1"
     if not isinstance(checkpoint, dict) or checkpoint.get("format") != expected_format:
         raise ValueError("Incompatible SuperMimic checkpoint format")
     task_metadata = checkpoint.get("go2_task")
@@ -71,7 +71,7 @@ def load_playback_source(task_id: str, checkpoint_file: str | Path) -> PlaybackS
     return PlaybackSource(cfg, checkpoint, path, snapshot)
 
 
-def build_playback_policy(source: PlaybackSource, adapter) -> ReferenceActor:
+def build_playback_policy(source: PlaybackSource, adapter) -> MoeActor:
     """用原训练语义验证权重，同时允许单环境、无噪声和固定课程播放。"""
     expected, actual = source.cfg.to_dict(), adapter.cfg.to_dict()
     for section, name in (("env", "num_envs"), ("noise", "add_noise"), ("terrain", "curriculum")):

@@ -2,7 +2,7 @@
 
 # Go2 SuperMimic 盲速度跟踪
 
-默认训练使用指定 [Go2-SuperMimic](https://github.com/Zhengtianjin/go2-supermimic/tree/d9eee9b3f248e5300e636c433255db2c1c3e086a) 的单 MLP 策略与训练结构，速度奖励采用 [SuperMimic 英文 v1](../paper/SuperMimic_2610.28480v1.pdf) 第16页表 A.6。策略只读取本体历史和速度命令；没有 MoE、教师、蒸馏或 PPO 更新。
+默认训练对齐指定 [Go2-SuperMimic](https://github.com/Zhengtianjin/go2-supermimic/tree/d9eee9b3f248e5300e636c433255db2c1c3e086a) 的训练结构，actor 改用 [go2_rl_gym](https://github.com/wty-yy/go2_rl_gym/tree/30e74dc507bec7a642a8c98be26081f2c6f0822d) 的混合专家历史编码器，速度奖励采用 [SuperMimic 英文 v1](../paper/SuperMimic_2610.28480v1.pdf) 第16页表 A.6。策略只读取本体历史，不含线速度输入；线速度由历史隐式估计。没有教师、蒸馏或 PPO 更新。
 
 这属于用户确认的从零 Go2 速度控制迁移。原论文速度接口与动作模仿联合训练，参考仓库任务是追逐和闪避；本项目没有复现其动作库先验或演示成绩。集中配置见 [Go2ReferenceCfg](../src/config/go2/go2_reference_supermimic_config.py)，算法来源见 [NOTICE](../agents/supermimic/single/NOTICE.md)，资产来源见 [参考资产说明](../src/assets/robots/go2/REFERENCE_NOTICE.md)。
 
@@ -23,7 +23,7 @@
 
 ```json
 {
-  "algorithm": "single_mlp",
+  "algorithm": "moe_history",
   "env": {"num_envs": 256},
   "single": {"replay_capacity": 256, "archive_size": 10000, "wm_batch": 256, "imag_batch": 256}
 }
@@ -35,7 +35,9 @@
 
 ## 任务与模型
 
-actor单帧45维：机体系角速度3、重力投影3、带编码器偏置的关节角偏移12、关节速度12、上一下发动作12、速度命令3。历史为5帧225维，外部接口按旧到新逐帧排列；MLP内部固定重排为参考的逐项历史，并为完整225维维护归一化。reset重复首帧。无相位、真实线速度、地形、接触或仿真参数输入。
+actor单帧45维：机体系角速度3、重力投影3、带编码器偏置的关节角偏移12、关节速度12、上一下发动作12、速度命令3。历史为5帧225维，按旧到新逐帧排列，reset重复首帧。无相位、真实线速度、地形、接触或仿真参数输入；线速度只能由历史经混合专家编码隐式估计。
+
+actor为混合专家历史编码器：225维历史经共享ELU骨干(512,256)与按专家分组的1×1卷积得到8个32维专家输出，Softmax门控加权求和后`L2Norm`投影为32维隐变量；隐变量与独立归一化的当前帧45维拼接，经ELU MLP(512,256,128)输出12维未缩放动作。负载均衡损失（系数0.01）按整批门控使用率与策略目标共同反传。结构、键名与超参对齐 go2_rl_gym 提交 `30e74dc`，可用其预训练权重热启动。
 
 命令为航向坐标系平移速度与世界坐标系yaw角速度；每5秒重采样，范围取论文附录G的均匀命令支路，10%站立。没有额外速度课程或参考动作命令支路。
 
@@ -67,10 +69,11 @@ actor单帧45维：机体系角速度3、重力投影3、带编码器偏置的�
 
 ```bash
 GO2_SUPERMIMIC_REFERENCE='<固定提交的参考仓库>' \
-SUPERMIMIC_REFERENCE_ROOT='<固定提交的参考仓库>' \
+GO2_RL_GYM_ROOT='<固定提交的go2_rl_gym仓库>' \
 CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 .venv/bin/python -B -m unittest \
   tests.test_agents.test_reference_supermimic \
   tests.test_tasks.test_reference_supermimic_task \
+  tests.test_tasks.test_go2_supermimic_driver \
   tests.test_scripts.test_single_supermimic_config -v
 
 RUN_REFERENCE_CPU=1 OMP_NUM_THREADS=1 .venv/bin/python -B -m unittest \
@@ -80,10 +83,12 @@ RUN_REFERENCE_GPU=1 OMP_NUM_THREADS=1 .venv/bin/python -B -m unittest \
   tests.test_training.test_reference_supermimic_training -v
 ```
 
-常规测试不自动启动训练。显式CPU检查用4环境和小网络，flat/rough各4轮；GPU检查用完整参考网络、64环境、64个模型窗口和128条想象，保留8步拟合与32步想象。两者均检查实际参数更新、保存/恢复、播放和部署。算法/任务对拍分别读取 `SUPERMIMIC_REFERENCE_ROOT` / `GO2_SUPERMIMIC_REFERENCE`，均指定上述固定提交仓库；缺少参考源码时该对拍项明确跳过。
+常规测试不自动启动训练。显式CPU检查用4环境和小网络，flat/rough各4轮；GPU检查用完整参考网络、64环境、64个模型窗口和128条想象，保留8步拟合与32步想象。两者均检查实际参数更新、保存/恢复、播放和部署。算法/任务对拍分别读取 `GO2_RL_GYM_ROOT`（混合专家编码器）与 `GO2_SUPERMIMIC_REFERENCE`（参考任务语义），均指定上述固定提交仓库；缺少参考源码时该对拍项明确跳过。
 
 训练产物保存配置、seed、源码哈希与归档、JSONL指标、进程退出状态及结果JSON。实际验证与独立审查维护在 [同主题审查记录](review/go2_blind_supermimic.md)。运行检查只能证明对应环节可用；完整训练、跟踪效果和真机部署需要单独验收。
 
 ## 配置版本
 
-当前只支持 `single_mlp`。历史 CTS、MoE、额外奖励及旧格式兼容代码已删除，旧配置和检查点不再支持；清理前的测试快照含已删除字段，需要重新生成。论文、来源记录和历史实验产物保留用于追溯，不代表仍可运行旧架构。
+当前只支持 `moe_history`（检查点与导出格式 `supermimic_moe_v1` / `supermimic_moe_policy_v1`）。旧的单 MLP 格式、历史 CTS 与蒸馏路径不再支持；变更前的配置和检查点需要重新训练，不做静默转换。论文、来源记录和历史实验产物保留用于追溯。
+
+外部策略驱动通过任务配置 `runner.driver` 提供：`policy` 指向 go2_rl_gym 的 MoE-CTS 导出文件，`expert_policy` 指向本项目历史检查点，`frac`/`expert_frac` 为环境占比，`fade_iterations` 控制线性衰减，`speed_min`/`speed_max` 为追逐命令速度范围。驱动环境位于环境尾部切片，只贡献真实数据，不参与策略更新。

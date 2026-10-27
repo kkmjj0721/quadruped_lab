@@ -1,7 +1,7 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    定义单 MLP 世界模型训练的状态、维度及真实转移协议。
+    定义混合专家世界模型训练的状态、维度及真实转移协议。
 """
 
 from __future__ import annotations
@@ -28,14 +28,14 @@ class AlgorithmSpec:
     command_dim: int
     semantic_id: str
     history_length: int = 5
-    model_id: str = "supermimic_single_mlp_v1"
+    model_id: str = "supermimic_moe_v1"
 
     def __post_init__(self):
         positive = (self.state_dim, self.delta_dim, self.action_dim,
                     self.observation_dim, self.privileged_dim, self.history_length)
         if any(value <= 0 for value in positive) or min(self.context_dim, self.memory_dim, self.command_dim) < 0:
             raise ValueError("Invalid algorithm dimensions")
-        if not self.semantic_id or self.model_id != "supermimic_single_mlp_v1":
+        if not self.semantic_id or self.model_id != "supermimic_moe_v1":
             raise ValueError("Unsupported or missing algorithm semantic identifier")
 
     @property

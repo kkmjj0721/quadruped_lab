@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：声明指定 Go2 参考模型、单 MLP 训练预算与论文表 A.6 速度任务。"""
+"""内容：声明指定 Go2 参考模型、混合专家训练预算与论文表 A.6 速度任务。"""
 
 import math
 
@@ -16,7 +16,7 @@ _FREQUENCY = 10 * 2 * math.pi
 class Go2ReferenceCfg(BaseConfig):
     """新训练默认；原论文没有本配置所需的 Go2 动作库先验。"""
 
-    algorithm = "single_mlp"
+    algorithm = "moe_history"
     single = SingleConfig
 
     class env:
@@ -79,6 +79,18 @@ class Go2ReferenceCfg(BaseConfig):
 
     class runner:
         enable_control_updates = True
+
+        class driver:
+            """外部策略在真实采集中代替当前策略行动，只贡献数据而不参与更新。"""
+
+            policy = ""
+            expert_policy = ""
+            # 与参考 driver_frac=0.25 一致；未设置 policy 时该占比不生效。
+            frac = 0.25
+            expert_frac = 0.0
+            fade_iterations = (1_000_000_000, 1_000_000_000)
+            speed_min = 0.5
+            speed_max = 3.0
 
     class control:
         """参考直流电机与0～2物理步延迟，动作比例为0.25×力矩上限/Kp。"""

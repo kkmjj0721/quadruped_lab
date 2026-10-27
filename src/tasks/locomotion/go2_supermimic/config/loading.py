@@ -78,11 +78,11 @@ def read_settings(path: Path) -> tuple[dict, bool]:
 
 
 def configuration_for_settings(settings: dict | None = None):
-    """只接受当前单 MLP 配置；未声明算法时使用同一默认值。"""
+    """只接受当前混合专家历史策略配置；未声明算法时使用同一默认值。"""
     from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
     settings = settings or {}
-    algorithm = settings.get("algorithm", "single_mlp")
-    if algorithm != "single_mlp":
+    algorithm = settings.get("algorithm", "moe_history")
+    if algorithm != "moe_history":
         raise ValueError(f"Unsupported SuperMimic algorithm: {algorithm}")
     return Go2ReferenceCfg()

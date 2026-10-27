@@ -1,6 +1,6 @@
 # quadruped_lab
 
-基于 MjLab 的四足机器人项目，提供基础 PPO 和 Go2 SuperMimic 盲速度跟踪任务。SuperMimic 默认采用单 MLP 策略与可微世界模型。
+基于 MjLab 的四足机器人项目，提供基础 PPO 和 Go2 SuperMimic 盲速度跟踪任务。SuperMimic 默认采用混合专家历史编码策略与可微世界模型。
 
 ## 安装
 

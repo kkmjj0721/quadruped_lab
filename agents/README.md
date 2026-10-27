@@ -14,7 +14,7 @@ agents/
 │   ├── utils.py      # 类与观测组配置解析
 │   ├── LICENSE
 │   └── NOTICE.md
-├── supermimic/       # 世界模型、连续回放与BPTT学习，single/提供默认单MLP策略
+├── supermimic/       # 世界模型、连续回放与BPTT学习，single/提供默认混合专家历史策略
 └── __init__.py
 ```
 
@@ -90,6 +90,6 @@ uv run --no-sync python -B -m unittest discover -s tests/test_agents -v
 
 测试在 CPU 合成环境验证采样、GAE、参数更新和检查点读写，不证明机器人训练收敛。来源、许可与适配范围见 [基础 PPO 说明](base/NOTICE.md)。
 
-## SuperMimic 单 MLP
+## SuperMimic 混合专家历史策略
 
-默认 Go2 任务使用 `agents.supermimic.single`：指定 Go2 参考仓库的完整历史 ELU MLP、SiLU 世界模型和短时域 BPTT。无教师或蒸馏，部署输入只有本体历史和速度命令。配置与训练、播放、验证入口统一见 [Go2任务说明](../docs/go2_supermimic.md)，来源与迁移差异见 [single/NOTICE.md](supermimic/single/NOTICE.md)。
+默认 Go2 任务使用 `agents.supermimic.single`：go2_rl_gym 的八专家历史编码器加 ELU 动作网络、SiLU 世界模型和短时域 BPTT。无教师或蒸馏，部署输入只有五帧本体历史，不含线速度；线速度由历史隐式估计。配置与训练、播放、验证入口统一见 [Go2任务说明](../docs/go2_supermimic.md)，来源与迁移差异见 [single/NOTICE.md](supermimic/single/NOTICE.md)。
