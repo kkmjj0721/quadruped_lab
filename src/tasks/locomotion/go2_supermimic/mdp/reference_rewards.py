@@ -34,9 +34,6 @@ def reference_reward_terms(task, state, action, next_state, failure):
         "body_orientation_l2": physical[:, GRAVITY][:, :2].square().sum(-1),
         "smoothness": (action - 2 * state.memory[:, PREVIOUS_ACTION]
                        + state.memory[:, PREVIOUS_PREVIOUS_ACTION]).square().sum(-1),
-        "stand_still": physical[:, JOINT_OFFSET].square().sum(-1)
-                       * (state.command[:, :2].norm(dim=-1) + state.command[:, 2].abs()
-                          <= cfg.stand_still_command_threshold),
     }
     terms.update(gait_reward_terms(task, state, next_state))
     terms["pose"] = posture_reward(task, state, next_state)

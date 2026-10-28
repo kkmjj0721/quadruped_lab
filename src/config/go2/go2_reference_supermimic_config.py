@@ -182,7 +182,6 @@ class Go2ReferenceCfg(BaseConfig):
         tracking_angular_variance = 0.5
         fall_angle = math.radians(70)
         fall_softness_deg = 5.0
-        stand_still_command_threshold = 0.1  # 平移命令模长加偏航命令绝对值不超过此值时启用。
 
         class gait:
             """相位按来源足名配置；软接触只用于想象近似。"""
@@ -214,4 +213,3 @@ class Go2ReferenceCfg(BaseConfig):
             lin_vel_z = -2.0
             body_orientation_l2 = -0.2
             smoothness = -0.01
-            stand_still = -0.5
