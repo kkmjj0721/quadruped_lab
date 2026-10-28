@@ -88,26 +88,34 @@ class MoeCtsDriver:
 
 
 class ActorDriver:
-    """把本项目训练的历史MLP检查点作为即时动作来源，只读取观测前缀。"""
+    """把已有盲速度策略作为数据来源，保存专家自己的历史而不参与策略更新。"""
 
     def __init__(self, path, observation_dim, action_dim, device):
-        from agents.supermimic.single.models import Mlp
+        from .deployment import checkpoint_actor
 
         checkpoint = torch.load(Path(path), map_location=device, weights_only=False)
-        self.observation_dim = int(checkpoint["obs_dim"])
-        if self.observation_dim > observation_dim:
-            raise ValueError("Expert policy expects more observations than the task provides")
-        self.actor = Mlp([self.observation_dim, *checkpoint["cfg"]["actor_hidden"], action_dim]).to(device)
-        self.actor.load_state_dict(checkpoint["actor"])
-        self.actor.eval().requires_grad_(False)
+        self.actor, _ = checkpoint_actor(checkpoint)
+        self.actor = self.actor.to(device)
+        if self.actor.observation_dim != observation_dim or self.actor.action_dim != action_dim:
+            raise ValueError("Expert policy observation and action dimensions differ from the task")
+        self.history = None
+        self.fresh = None
 
     @torch.no_grad()
     def act(self, observation):
-        return self.actor(observation[:, :self.observation_dim])
+        if self.history is None:
+            self.history = observation[:, None].repeat(1, self.actor.history_length, 1)
+            self.fresh = torch.zeros(observation.shape[0], dtype=torch.bool, device=observation.device)
+        else:
+            history = torch.cat((self.history[:, 1:], observation[:, None]), 1)
+            self.history = torch.where(self.fresh[:, None, None], observation[:, None].expand_as(history), history)
+            self.fresh.zero_()
+        return self.actor(self.history)
 
     def reset(self, done):
-        """无内部状态，保留接口与其他驱动一致。"""
-        return None
+        """专家回合结束后，用新回合首帧填满其历史。"""
+        if self.fresh is not None:
+            self.fresh.logical_or_(done)
 
 
 class ChaseSteer:

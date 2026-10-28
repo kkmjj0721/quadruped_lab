@@ -14,7 +14,18 @@ agents/
 │   ├── utils.py      # 类与观测组配置解析
 │   ├── LICENSE
 │   └── NOTICE.md
-├── supermimic/       # 世界模型、连续回放与BPTT学习，single/提供默认混合专家历史策略
+├── supermimic/       # 世界模型、连续回放与BPTT学习
+│   ├── config.py         # SuperMimicConfig、ExecutionConfig
+│   ├── interfaces.py     # TaskState、EnvStep、AlgorithmSpec
+│   ├── world_model.py    # 归一化与世界模型
+│   ├── policy.py         # 混合专家 actor、critic
+│   ├── buffer.py         # 种子、窗口、回放与归档
+│   ├── imagine.py        # 想象轨迹与回报
+│   ├── learner.py        # 梯度裁剪与更新
+│   ├── runner.py         # 训练循环、保存与续训
+│   ├── export.py         # TorchScript／ONNX 导出
+│   ├── logging.py        # TensorBoard 与终端日志
+│   └── NOTICE.md
 └── __init__.py
 ```
 
@@ -92,4 +103,4 @@ uv run --no-sync python -B -m unittest discover -s tests/test_agents -v
 
 ## SuperMimic 混合专家历史策略
 
-默认 Go2 任务使用 `agents.supermimic.single`：go2_rl_gym 的八专家历史编码器加 ELU 动作网络、SiLU 世界模型和短时域 BPTT。无教师或蒸馏，部署输入只有五帧本体历史，不含线速度；线速度由历史隐式估计。配置与训练、播放、验证入口统一见 [Go2任务说明](../docs/go2_supermimic.md)，来源与迁移差异见 [single/NOTICE.md](supermimic/single/NOTICE.md)。
+默认 Go2 任务使用 `agents.supermimic`：go2_rl_gym 的八专家历史编码器加 ELU 动作网络、SiLU 世界模型和短时域 BPTT。无教师或蒸馏，部署输入只有五帧本体历史，不含线速度；线速度由历史隐式估计。配置与训练、播放、验证入口统一见 [Go2任务说明](../docs/go2_supermimic.md)，来源与迁移差异见 [supermimic/NOTICE.md](supermimic/NOTICE.md)。

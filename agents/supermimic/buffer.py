@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：保存真实终态并按抽取窗口局部构造历史、终止掩码及稀有事件归档。"""
+"""内容：保存真实转移及完整历史，并构造参考终止掩码与稀有事件归档。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from dataclasses import dataclass, fields
 import torch
 from torch import Tensor
 
-from ..interfaces import TaskState
+from .interfaces import TaskState
 
 
 @dataclass
@@ -19,7 +19,7 @@ class Seed:
 
 @dataclass
 class Window:
-    """批次优先；终止那一步有效，后续转移不参与同一条监督轨迹。"""
+    """批次优先；目标取下一slot，终止当步的reset后状态仅供参考稀有事件判定。"""
 
     initial: TaskState
     actions: Tensor
@@ -41,21 +41,20 @@ class Window:
 
 
 class Replay:
-    """只检查被抽中的局部时间索引，不生成 capacity×num_envs 的全库掩码。"""
+    """完整历史以半精度保存，所有已采集时刻均可独立作为想象起点。"""
 
     def __init__(self, spec, num_envs: int, capacity: int, device):
-        if capacity < spec.history_length + 1:
-            raise ValueError("Replay capacity must exceed history length")
+        if capacity < 1:
+            raise ValueError("Replay capacity must be positive")
         self.spec, self.num_envs, self.capacity = spec, num_envs, capacity
         self.device = torch.device(device)
         self.size = self.clock = 0
         self.states = self._state_storage((capacity, num_envs))
-        self.targets = self._state_storage((capacity, num_envs))
         self.actions = torch.zeros(capacity, num_envs, spec.action_dim, device=device)
-        self.observations = torch.zeros(capacity, num_envs, spec.observation_dim, device=device, dtype=torch.float16)
+        self.histories = torch.zeros(capacity, num_envs, spec.history_length, spec.observation_dim,
+                                     device=device, dtype=torch.float16)
         self.done = torch.zeros(capacity, num_envs, device=device, dtype=torch.bool)
         self.terminated = torch.zeros_like(self.done)
-        self.ages = torch.zeros(capacity, num_envs, device=device, dtype=torch.long)
 
     def _state_storage(self, shape):
         widths = (self.spec.state_dim, self.spec.memory_dim, self.spec.command_dim, self.spec.context_dim)
@@ -65,44 +64,43 @@ class Replay:
         self.size = self.clock = 0
 
     @torch.no_grad()
-    def add(self, state: TaskState, observation: Tensor, action: Tensor, result, age: Tensor):
+    def add(self, state: TaskState, history: Tensor, action: Tensor, result):
         slot = self.clock % self.capacity
         for field in fields(TaskState):
             getattr(self.states, field.name)[slot].copy_(getattr(state, field.name))
-            getattr(self.targets, field.name)[slot].copy_(getattr(result.final_state, field.name))
-        self.observations[slot].copy_(observation)
+        self.histories[slot].copy_(history)
         self.actions[slot].copy_(action)
         self.done[slot].copy_(result.terminated | result.truncated)
         self.terminated[slot].copy_(result.terminated)
-        self.ages[slot].copy_(age)
         self.clock += 1
         self.size = min(self.size + 1, self.capacity)
 
     def ready(self, horizon: int) -> bool:
-        return self.size >= horizon + self.spec.history_length - 1
+        return self.size > horizon + 1
 
     def _sample_indices(self, batch: int, horizon: int):
         if batch < 1 or horizon < 1 or not self.ready(horizon):
-            raise ValueError("Replay has insufficient history and future context for sampling")
+            raise ValueError("Replay has insufficient state slots for sampling")
         rows = torch.randint(self.num_envs, (batch,), device=self.device)
-        logical = torch.randint(self.spec.history_length - 1, self.size - horizon + 1, (batch,), device=self.device)
+        logical = torch.randint(0, self.size - horizon, (batch,), device=self.device)
         return rows, (self.clock - self.size + logical) % self.capacity
 
     def sample_seeds(self, batch: int) -> Seed:
-        rows, slots = self._sample_indices(batch, 1)
-        offsets = torch.arange(self.spec.history_length - 1, -1, -1, device=self.device)
-        actual = torch.minimum(self.ages[slots, rows, None], offsets)
-        history_slots = (slots[:, None] - actual) % self.capacity
-        history = self.observations[history_slots, rows[:, None]].float()
-        return Seed(self.states.index((slots, rows)), history)
+        if batch < 1 or self.size == 0:
+            raise ValueError("Cannot sample an empty replay or nonpositive seed batch")
+        rows = torch.randint(self.num_envs, (batch,), device=self.device)
+        logical = torch.randint(self.size, (batch,), device=self.device)
+        slots = (self.clock - self.size + logical) % self.capacity
+        return Seed(self.states.index((slots, rows)), self.histories[slots, rows].float())
 
     def sample_windows(self, batch: int, horizon: int) -> Window:
         rows, starts = self._sample_indices(batch, horizon)
         slots = (starts[:, None] + torch.arange(horizon, device=self.device)) % self.capacity
         done = self.done[slots, rows[:, None]]
-        valid = torch.cat((torch.ones_like(done[:, :1]), (~done[:, :-1]).cumprod(dim=1).bool()), dim=1)
+        valid = (~done).cumprod(dim=1).bool()
         return Window(self.states.index((starts, rows)), self.actions[slots, rows[:, None]],
-                      self.targets.index((slots, rows[:, None])), valid, self.terminated[slots, rows[:, None]])
+                      self.states.index(((slots + 1) % self.capacity, rows[:, None])), valid,
+                      self.terminated[slots, rows[:, None]])
 
 
 class WindowArchive:

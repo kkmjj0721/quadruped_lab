@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 
 import torch
 from mjlab.utils.wrappers import VideoRecorder
@@ -93,7 +94,7 @@ def _restore_curriculum(adapter, checkpoint):
     adapter.terrain_curriculum.family_ids.copy_(families[rows].to(adapter.device))
     adapter.load_curriculum_state_dict({
         "command": saved["command"],
-        "terrain": {"family_ids": families[rows], "levels": levels[rows]},
+        "terrain": {**terrain, "family_ids": families[rows], "levels": levels[rows]},
     })
 
 
@@ -133,3 +134,29 @@ def make_playback(task_id, *, checkpoint_file=None, agent="trained", num_envs=No
     except BaseException:
         adapter.close()
         raise
+
+
+def make_playback_env(task_id, *, checkpoint_file=None, agent="trained", num_envs=None, device="cpu",
+                      video=False, video_length=200, video_height=None, video_width=None,
+                      no_terminations=False):
+    """在播放环境外按需装配录像；录像器不可用时关闭已建环境并继续抛出。"""
+    checkpoint = Path(checkpoint_file).expanduser().resolve() if checkpoint_file is not None else None
+    record_video = checkpoint is not None and video
+    if video and checkpoint is None:
+        print("[WARN] Video recording with dummy agents is disabled (no checkpoint/log_dir).")
+    env, policy = make_playback(
+        task_id, checkpoint_file=checkpoint, agent=agent, num_envs=num_envs, device=device,
+        render_mode="rgb_array" if record_video else None, video_height=video_height,
+        video_width=video_width, no_terminations=no_terminations,
+    )
+    if not record_video:
+        return env, policy
+    try:
+        recorder = SuperMimicVideoRecorder(env, video_folder=checkpoint.parent / "videos" / "play",
+                                           step_trigger=lambda step: step == 0,
+                                           video_length=video_length, disable_logger=True)
+    except BaseException:
+        env.close()
+        raise
+    print("[INFO] Recording videos during play.")
+    return recorder, policy

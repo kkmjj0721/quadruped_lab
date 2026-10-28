@@ -7,7 +7,7 @@ digraph G {
   subgraph cluster_cfg {
     label="① 配置层（唯一数值来源，可被 JSON / CLI 覆盖）"; style="rounded,dashed"; color="#8a8a8a"; fontsize=11;
     cfg1 [label="Go2ReferenceCfg\nsrc/config/go2/go2_reference_supermimic_config.py\nenv / sim / reset / noise / control / collision\nterrain / DR / commands / reward / runner", fillcolor="#fdf6e3"];
-    cfg2 [label="SingleConfig + SingleExecutionConfig\nagents/supermimic/single/config.py\n回放、预热、窗口、想象、网络、优化、探索、护栏", fillcolor="#fdf6e3"];
+    cfg2 [label="SuperMimicConfig + ExecutionConfig\nagents/supermimic/config.py\n回放、预热、窗口、想象、网络、优化、探索、护栏", fillcolor="#fdf6e3"];
   }
 
   subgraph cluster_task {
@@ -21,16 +21,16 @@ digraph G {
 
   subgraph cluster_agent {
     label="③ 算法层 agents/supermimic（不含 Go2 规则，只认 TaskState 张量语义）"; style="rounded,dashed"; color="#8a8a8a"; fontsize=11;
-    run  [label="single/runner.py  SingleRunner\n采集 / 归档 / 调度 / 护栏 / 保存 / 续训"];
-    rep  [label="single/replay.py\nReplay（capacity×num_envs 环形）\nWindowArchive（稀有事件整窗）"];
-    mdl  [label="single/models.py\nMoeActor / Critic / WorldModel / RunningNorm"];
-    lrn  [label="single/learner.py + imagination.py\nfit_model / improve / 32 步 BPTT / lambda-return"];
+    run  [label="runner.py  SuperMimicRunner\n采集 / 归档 / 调度 / 护栏 / 保存 / 续训"];
+    rep  [label="buffer.py\nReplay（capacity×num_envs 环形）\nWindowArchive（稀有事件整窗）"];
+    mdl  [label="policy.py + world_model.py\nMoeActor / Critic / WorldModel / RunningNorm"];
+    lrn  [label="learner.py + imagine.py\nfit_model / improve / 32 步 BPTT / lambda-return"];
   }
 
   subgraph cluster_io {
     label="④ 入口、产物与部署"; style="rounded,dashed"; color="#8a8a8a"; fontsize=11;
-    ent  [label="scripts/train.py（SuperMimic 分支）\nscripts/play.py（播放/录像）\nrl/training.py · rl/single_runner.py · rl/playback.py", fillcolor="#e8f5e9"];
-    out  [label="logs/supermimic/go2_supermimic/<时间戳>/\nmodel_N.pt · policy_N.{pt,onnx,json}\ntask_config.json · run_config.json · metrics.jsonl\nsources.zip + source_manifest.json", fillcolor="#fff3e0"];
+    ent  [label="scripts/train.py（SuperMimic 分支）\nscripts/play.py（播放/录像）\nrl/training.py · rl/runner.py · rl/playback.py", fillcolor="#e8f5e9"];
+    out  [label="logs/supermimic/go2_supermimic/<时间戳>/\nmodel_N.pt · events.out.tfevents.*\ntask_config.json\n（部署策略由 tools/export_supermimic_policy.py 显式导出）", fillcolor="#fff3e0"];
   }
 
   cfg1 -> env [style=dashed, label="装配"];

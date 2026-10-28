@@ -13,6 +13,7 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers import SceneEntityCfg, TerminationTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.scene import SceneCfg
+from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.viewer import ViewerConfig
 
@@ -27,8 +28,10 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
     """在构造仿真前统一校验任务入口参数。"""
     if cfg.algorithm != "moe_history":
         raise ValueError("SuperMimic requires the moe_history algorithm")
-    if cfg.commands.heading_command:
-        raise ValueError("SuperMimic requires direct yaw-rate commands")
+    if not cfg.commands.heading_command or cfg.commands.rel_heading_envs != 1.0:
+        raise ValueError("The HIM adaptation requires heading commands for all moving environments")
+    if cfg.commands.stages:
+        raise ValueError("Velocity curriculum is disabled for the HIM adaptation")
     if isinstance(cfg.env.num_envs, bool) or not isinstance(cfg.env.num_envs, int) or cfg.env.num_envs < 1:
         raise ValueError("Environment count must be a positive integer")
     if not math.isfinite(cfg.env.episode_length_s) or cfg.env.episode_length_s <= 0:
@@ -39,8 +42,28 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
         raise ValueError("Control decimation must be a positive integer")
     if cfg.env.num_obs_history != 5:
         raise ValueError("The Go2 actor requires exactly five history frames")
+    if (cfg.env.num_critic_obs, cfg.env.num_privileged_obs) != (210, 210):
+        raise ValueError("The 12-reward task requires 210 critic observations; use a current task configuration")
     if cfg.terrain.mode not in ("flat", "rough"):
         raise ValueError("Unsupported SuperMimic terrain mode")
+    if cfg.reward.gait.period <= 0 or not 0 < cfg.reward.gait.stance_fraction < 1 or cfg.reward.gait.contact_softness <= 0:
+        raise ValueError("Gait period, stance fraction and contact softness are invalid")
+    if not all(math.isfinite(value) for value in (
+        cfg.reward.gait.period, cfg.reward.gait.stance_fraction, cfg.reward.gait.contact_height,
+        cfg.reward.gait.contact_softness, cfg.reward.gait.command_threshold,
+    )) or set(cfg.reward.gait.offsets) != set(FOOT_NAMES):
+        raise ValueError("Gait parameters must be finite and define every foot by name")
+    command_ranges = (*cfg.commands.initial_ranges, cfg.commands.heading_range, cfg.commands.resampling_time)
+    if len(cfg.commands.initial_ranges) != 3 or any(
+        len(bounds) != 2 or not all(math.isfinite(value) for value in bounds) or bounds[0] > bounds[1]
+        for bounds in command_ranges
+    ):
+        raise ValueError("Command ranges must be finite and ordered pairs")
+    for value in (cfg.commands.rel_standing_envs, cfg.commands.rel_forward_envs):
+        if not 0 <= value <= 1:
+            raise ValueError("Command mode probabilities must be in [0,1]")
+    if len(cfg.commands.resampling_time) != 2 or not 0 < cfg.commands.resampling_time[0] <= cfg.commands.resampling_time[1]:
+        raise ValueError("Command resampling times must be positive and ordered")
 
 
 def make_go2_supermimic_env_cfg(
@@ -57,7 +80,12 @@ def make_go2_supermimic_env_cfg(
     scene = SceneCfg(
         entities={"robot": get_reference_go2_robot_cfg(cfg)},
         terrain=terrain_map.entity_cfg(),
-        sensors=(),
+        sensors=(ContactSensorCfg(
+            name="feet_ground_contact",
+            primary=ContactMatch(mode="geom", pattern=feet, entity="robot"),
+            secondary=ContactMatch(mode="body", pattern="terrain"),
+            fields=("found", "force"), reduce="netforce", num_slots=1, track_air_time=True,
+        ),),
         num_envs=cfg.env.num_envs,
         extent=cfg.env.scene_extent,
     )
@@ -95,12 +123,16 @@ def make_go2_supermimic_env_cfg(
     }
     if cfg.domain_randomization.enabled:
         domain = cfg.domain_randomization
-        events.update({
-            "foot_friction": EventTermCfg(func=envs_mdp.dr.geom_friction, mode="startup", params={
+        for name, axis, distribution, bounds in (
+            ("slide", 0, "uniform", domain.friction_range),
+            ("spin", 1, "log_uniform", domain.spin_friction_range),
+            ("roll", 2, "log_uniform", domain.roll_friction_range),
+        ):
+            events[f"foot_friction_{name}"] = EventTermCfg(func=envs_mdp.dr.geom_friction, mode="startup", params={
                 "asset_cfg": SceneEntityCfg("robot", geom_names=feet), "operation": "abs",
-                "distribution": "uniform", "ranges": tuple(domain.friction_range),
-                "axes": [0], "shared_random": True,
-            }),
+                "distribution": distribution, "ranges": tuple(bounds), "axes": [axis], "shared_random": True,
+            })
+        events.update({
             "encoder_bias": EventTermCfg(func=envs_mdp.dr.encoder_bias, mode="startup", params={
                 "asset_cfg": SceneEntityCfg("robot"), "bias_range": tuple(domain.encoder_bias_range),
             }),

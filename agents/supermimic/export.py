@@ -11,8 +11,8 @@ from tempfile import TemporaryDirectory
 import torch
 
 
-def export_policy(actor, directory, *, iteration: int, metadata=None):
-    """每个产物原子替换；部署图含历史与当前帧两套归一化，不含世界模型、critic 或任务。"""
+def _prepare_policy(actor, iteration, metadata):
+    """冻结部署副本并生成两种导出入口共用的元数据。"""
     if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
         raise ValueError("Export iteration must be a nonnegative integer")
     module = deepcopy(actor).cpu().eval().requires_grad_(False)
@@ -37,25 +37,49 @@ def export_policy(actor, directory, *, iteration: int, metadata=None):
                     "latent_dim": module.encoder.moe.experts.output_dim,
                     "gate_input": "normalized_history"},
     }
+    return module, information
+
+
+def _write_onnx(module, path, information):
+    """把完整策略与元数据写入尚未发布的ONNX文件。"""
     import onnx
+
+    torch.onnx.export(module, (torch.zeros(1, module.history_length * module.observation_dim),),
+                      str(path), export_params=True, opset_version=18, dynamo=False,
+                      input_names=["obs_history"], output_names=["actions"], external_data=False,
+                      dynamic_axes={"obs_history": {0: "batch"}, "actions": {0: "batch"}})
+    model = onnx.load(path)
+    for name, value in information.items():
+        field = model.metadata_props.add()
+        field.key, field.value = name, json.dumps(value, ensure_ascii=False, allow_nan=False)
+    onnx.checker.check_model(model)
+    onnx.save(model, path)
+
+
+def export_policy_onnx(actor, path, *, iteration: int, metadata=None):
+    """检查点保存时仅更新当前ONNX，包含MoE和归一化，不生成逐轮部署副本。"""
+    module, information = _prepare_policy(actor, iteration, metadata)
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix=".policy_export_", dir=destination.parent) as temporary:
+        pending = Path(temporary) / "policy.onnx"
+        _write_onnx(module, pending, information)
+        os.replace(pending, destination)
+    return destination
+
+
+def export_policy(actor, directory, *, iteration: int, metadata=None):
+    """显式部署导出保留PT／ONNX／JSON及轮次副本，各产物原子替换。"""
+    module, information = _prepare_policy(actor, iteration, metadata)
 
     destination = Path(directory)
     destination.mkdir(parents=True, exist_ok=True)
     paths = {"pt": destination / f"policy_{iteration}.pt", "onnx": destination / f"policy_{iteration}.onnx",
              "metadata": destination / f"policy_{iteration}.json"}
-    with TemporaryDirectory(prefix=".single_policy_", dir=destination) as temporary:
+    with TemporaryDirectory(prefix=".policy_export_", dir=destination) as temporary:
         temporary = Path(temporary)
         torch.jit.script(module).save(str(temporary / "policy.pt"))
-        torch.onnx.export(module, (torch.zeros(1, module.history_length * module.observation_dim),),
-                          str(temporary / "policy.onnx"), export_params=True, opset_version=18, dynamo=False,
-                          input_names=["obs_history"], output_names=["actions"], external_data=False,
-                          dynamic_axes={"obs_history": {0: "batch"}, "actions": {0: "batch"}})
-        model = onnx.load(temporary / "policy.onnx")
-        for name, value in information.items():
-            field = model.metadata_props.add()
-            field.key, field.value = name, json.dumps(value, ensure_ascii=False, allow_nan=False)
-        onnx.checker.check_model(model)
-        onnx.save(model, temporary / "policy.onnx")
+        _write_onnx(module, temporary / "policy.onnx", information)
         (temporary / "policy.json").write_text(json.dumps(information, ensure_ascii=False, allow_nan=False, indent=2) + "\n", encoding="utf-8")
         for kind, path in paths.items():
             filename = "policy.json" if kind == "metadata" else f"policy.{kind}"

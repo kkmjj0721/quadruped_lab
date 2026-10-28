@@ -1,13 +1,12 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    按任务ID启动PPO或Go2 SuperMimic训练，分别使用各自的配置与运行器。
+    统一训练入口：先解析任务ID，再按该任务的参数结构解析并启动训练。
 
 用法：
     python scripts/train.py Unitree-Go2-Flat --env.scene.num-envs 64
-    python scripts/train.py Unitree-Go2-SuperMimic-Rough --device cuda:0 --num-envs 64
-    python -m scripts.train Unitree-Go2-Flat --gpu-ids None \
-        --env.scene.num-envs 1 --agent.max-iterations 1
+    python scripts/train.py Unitree-Go2-SuperMimic-Flat --device cuda:0 --num-envs 4096
+    python -m scripts.train Unitree-Go2-Flat --gpu-ids None --env.scene.num-envs 1
 """
 
 from __future__ import annotations
@@ -34,6 +33,8 @@ from mjlab.utils.gpu import select_gpus
 from mjlab.utils.os import dump_yaml, get_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
+
+SUPERMIMIC_PREFIX = "Unitree-Go2-SuperMimic-"
 
 
 @dataclass(frozen=True)
@@ -194,24 +195,24 @@ def launch_training(task_id: str, args: TrainConfig | None = None) -> None:
     ).run(run_train, task_id, args, log_dir)
 
 
+def supermimic_task(task_id: str | None) -> bool:
+    """SuperMimic 任务使用自己的参数、装配与产物目录，不进入PPO注册表。"""
+    if task_id is None or not task_id.startswith(SUPERMIMIC_PREFIX):
+        return False
+    from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
+
+    if task_id not in TASK_MODES:
+        raise ValueError(f"Unknown Go2 SuperMimic task: {task_id}")
+    return True
+
+
 def main() -> None:
     """先解析任务 ID，再根据该任务配置解析命令行覆盖。"""
-    # SuperMimic独立解析并装配，不能套用RSL-RL wrapper或加载其他task的MDP。
-    if len(sys.argv) > 1 and sys.argv[1].startswith("Unitree-Go2-SuperMimic"):
-        from src.tasks.locomotion.go2_supermimic.config.train_cfg import (
-            TASK_MODES, SuperMimicTrainConfig, normalize_train_arguments,
-        )
-        from src.tasks.locomotion.go2_supermimic.rl.training import launch_training as launch_supermimic
+    # 提前读取任务ID，避免任何分支都导入PPO注册表。
+    if supermimic_task(sys.argv[1] if len(sys.argv) > 1 else None):
+        from src.tasks.locomotion.go2_supermimic.cli import train_main
 
-        task_id = tyro.cli(
-            tyro.extras.literal_type_from_choices(tuple(TASK_MODES)),
-            args=[sys.argv[1]], add_help=False, config=mjlab.TYRO_FLAGS,
-        )
-        args = tyro.cli(
-            SuperMimicTrainConfig, args=normalize_train_arguments(sys.argv[2:]),
-            prog=f"{sys.argv[0]} {task_id}", config=mjlab.TYRO_FLAGS,
-        )
-        launch_supermimic(task_id, args)
+        train_main(sys.argv[1], sys.argv[2:])
         return
 
     from src.tasks import register_tasks

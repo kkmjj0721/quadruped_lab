@@ -6,11 +6,11 @@ import math
 
 
 @dataclass
-class SingleExecutionConfig:
+class ExecutionConfig:
     """限制同时参与计算的样本数，不改变总训练批量或检查点语义。"""
 
-    imag_microbatch: int = 256
-    critic_microbatch: int = 4096
+    imag_microbatch: int = 4096
+    critic_microbatch: int = 32768
 
     def __post_init__(self):
         for name in ("imag_microbatch", "critic_microbatch"):
@@ -20,18 +20,19 @@ class SingleExecutionConfig:
 
 
 @dataclass
-class SingleConfig:
-    """默认预算参考 Go2-SuperMimic d9eee9b3；专家结构与 go2_rl_gym 30e74dc 对齐。"""
+class SuperMimicConfig:
+    """批量对齐参考 flat 运行，其余预算参考 d9eee9b3；专家结构对齐 go2_rl_gym 30e74dc。"""
 
     replay_capacity: int = 1000
     collect_steps: int = 1
-    initial_collection_steps: int = 16
     warmup_iterations: int = 300
+    wm_rewarmup_iterations: int = 1500
+    critic_warmup_iterations: int = 500
     wm_hidden: tuple[int, ...] = (1024, 1024, 1024)
     wm_window: int = 8
-    wm_batch: int = 2048
+    wm_batch: int = 1024
     wm_updates: int = 2
-    imag_batch: int = 8192
+    imag_batch: int = 4096
     horizon: int = 32
     gamma: float = 0.99
     lam: float = 0.95
@@ -40,7 +41,6 @@ class SingleConfig:
     moe_expert_num: int = 8
     moe_hidden: tuple[int, ...] = (512, 256, 256)
     moe_latent_dim: int = 32
-    load_balance_coef: float = 0.01
     learning_rate: float = 2e-4
     actor_lr_scale: float = 1.0
     actor_ramp_iterations: int = 1000
@@ -62,17 +62,17 @@ class SingleConfig:
     archive_keep_prob: float = 0.02
     collapse_falls: float = 3.0
     collapse_interval: int = 50
-    driver_frac: float = 0.0
+    driver_frac: float = 0.25
     expert_frac: float = 0.0
     driver_fade: tuple[int, int] = (1_000_000_000, 1_000_000_000)
     driver_vmin: float = 0.5
     driver_vmax: float = 3.0
 
     def __post_init__(self):
-        positive = ("replay_capacity", "collect_steps", "initial_collection_steps", "wm_window", "wm_batch",
+        positive = ("replay_capacity", "collect_steps", "wm_window", "wm_batch",
                     "wm_updates", "imag_batch", "horizon", "lr_decay_iterations", "critic_epochs",
                     "critic_minibatches", "collapse_interval", "moe_expert_num", "moe_latent_dim")
-        for name in positive + ("warmup_iterations", "actor_ramp_iterations", "archive_size"):
+        for name in positive + ("warmup_iterations", "wm_rewarmup_iterations", "critic_warmup_iterations", "actor_ramp_iterations", "archive_size"):
             value = getattr(self, name)
             minimum = 1 if name in positive else 0
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
@@ -92,7 +92,7 @@ class SingleConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-        for name in ("action_noise", "explore_noise", "collapse_falls", "load_balance_coef", "driver_vmin", "driver_vmax"):
+        for name in ("action_noise", "explore_noise", "collapse_falls", "driver_vmin", "driver_vmax"):
             if isinstance(getattr(self, name), bool) or not math.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
         for name in ("driver_frac", "expert_frac"):

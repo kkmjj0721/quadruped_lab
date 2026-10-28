@@ -1,12 +1,11 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    独立格式化SuperMimic真实采集、模型训练和想象控制日志，并逐轮保存数字指标。
+    独立格式化SuperMimic真实采集、模型训练和想象控制日志，并逐轮写入TensorBoard标量。
 """
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Mapping
 from numbers import Real
@@ -20,7 +19,7 @@ def _positive_integer(name: str, value: int) -> None:
 
 
 def _numeric_metrics(metrics: Mapping[str, Real]) -> dict[str, int | float]:
-    """复制并验证JSON可保存的有限数字，不修改调用方的映射。"""
+    """复制并验证可写入TensorBoard的有限数字，不修改调用方的映射。"""
     if not isinstance(metrics, Mapping):
         raise TypeError("Training metrics must be a flat mapping of string keys to finite numbers")
     values = {}
@@ -40,7 +39,7 @@ def _numeric_metrics(metrics: Mapping[str, Real]) -> dict[str, int | float]:
 
 
 def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -> str:
-    """按本地Go2 PPO的80列单块样式显示训练摘要，详细诊断保留在JSONL。"""
+    """按本地Go2 PPO的80列单块样式显示训练摘要，详细诊断保留在TensorBoard标量。"""
     _positive_integer("num_envs", num_envs)
     values = _numeric_metrics(metrics)
 
@@ -112,7 +111,7 @@ def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -
 
 
 class TrainingLogger:
-    """JSONL逐轮完整保存，终端按迭代间隔显示并保留首轮与目标末轮。"""
+    """逐轮写入TensorBoard标量，终端按迭代间隔显示并保留首轮与目标末轮。"""
 
     def __init__(self, log_dir: str | Path | None, *, num_envs: int, device, log_interval: int = 1):
         _positive_integer("num_envs", num_envs)
@@ -122,16 +121,31 @@ class TrainingLogger:
         self.log_interval = log_interval
         self.log_dir = Path(log_dir) if log_dir is not None else None
         self._records = 0
+        self._writer = None
         if self.log_dir is not None:
+            # 事件文件是运行目录内唯一的日志产物，tag按"/"分组成TensorBoard面板。
+            from torch.utils.tensorboard import SummaryWriter
+
             self.log_dir.mkdir(parents=True, exist_ok=True)
+            self._writer = SummaryWriter(str(self.log_dir))
+
+    def add_text(self, tag: str, text: str) -> None:
+        """把一次性的运行来源信息写入同一事件文件，不新增运行目录文件。"""
+        if self._writer is not None:
+            self._writer.add_text(tag, text, 0)
 
     def record(self, metrics: Mapping[str, Real], *, force: bool = False) -> None:
         values = _numeric_metrics(metrics)
-        if self.log_dir is not None:
-            with (self.log_dir / "metrics.jsonl").open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(values, allow_nan=False) + "\n")
         self._records += 1
         iteration = values.get("iteration", self._records)
+        if self._writer is not None:
+            for name, value in values.items():
+                self._writer.add_scalar(name, value, iteration)
         target = values.get("training_target_iteration")
         if force or self._records == 1 or iteration % self.log_interval == 0 or iteration == target:
             print(format_training_log(values, num_envs=self.num_envs, device=self.device), flush=True)
+
+    def close(self) -> None:
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None

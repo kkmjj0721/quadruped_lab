@@ -1,9 +1,9 @@
 # Copyright (c) 2026-2027 zh
-"""内容：声明指定 Go2 参考模型、混合专家训练预算与论文表 A.6 速度任务。"""
+"""内容：声明指定Go2参考模型、混合专家策略、HIM命令及十二项速度奖励。"""
 
 import math
 
-from agents.supermimic.single.config import SingleConfig
+from agents.supermimic.config import SuperMimicConfig
 from src.config.base.base_config import BaseConfig
 
 
@@ -17,7 +17,7 @@ class Go2ReferenceCfg(BaseConfig):
     """新训练默认；原论文没有本配置所需的 Go2 动作库先验。"""
 
     algorithm = "moe_history"
-    single = SingleConfig
+    algo = SuperMimicConfig
 
     class env:
         """固定任务协议的维度、环境规模及回合预算。"""
@@ -25,14 +25,14 @@ class Go2ReferenceCfg(BaseConfig):
         num_envs = 4096
         num_actions = 12
         scene_extent = 2.0
-        seed = 7
+        seed = 0
         episode_length_s = 20.0
         num_obs_history = 5
         history_size = num_obs_history
         num_observations = 45
         num_obs = num_observations * num_obs_history
-        num_privileged_obs = 179
-        num_critic_obs = 179
+        num_privileged_obs = 210
+        num_critic_obs = 210
 
     class sim:
         """平地和粗糙地形共用的仿真预算；物理步长以秒计。"""
@@ -40,7 +40,7 @@ class Go2ReferenceCfg(BaseConfig):
         nconmax = None
         njmax = 300
         broadphase = "nxn"
-        solver = "cg"
+        solver = "newton"
         timestep = 0.005
         iterations = 10
         ls_iterations = 20
@@ -50,8 +50,8 @@ class Go2ReferenceCfg(BaseConfig):
         """回合重置的位姿与速度扰动；不改变真实课程分配的出生地块。"""
 
         base_offset = {
-            "pose_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1), "z": (0.0, 0.0),
-                           "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (-math.pi, math.pi)},
+            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (0.01, 0.05),
+                           "yaw": (-3.14, 3.14)},
             "velocity_range": {},
         }
         joint_offset = {"position_range": (0.0, 0.0), "velocity_range": (0.0, 0.0)}
@@ -131,69 +131,75 @@ class Go2ReferenceCfg(BaseConfig):
         }
 
     class terrain:
-        """指定LPACRL项目的地形几何；课程由当前任务单独实现。"""
+        """指定Go2参考的5×7地形及12000轮按进度开放课程。"""
 
         mode = "flat"
-        seed = 0
-        patch_size_m = (8.0, 8.0)
+        seed = 7
+        patch_size_m = (12.0, 12.0)
         core_rows = 5
-        surrounding_rings = 1
-        outer_flat_width_m = 16.0
+        num_cols = 7
+        outer_flat_width_m = 10.0
         max_init_level = 0
-        curriculum = False
-        boundary_margin_m = 1.1
-        levels = {
-            "random_rough": {f"l{i}": {"height_max_m": height}
-                             for i, height in enumerate((0.02, 0.03, 0.045, 0.06))},
-            **{f"stairs_{label}_outward_{direction}": {
-                f"l{i}": {"step_height_m": height, "step_width": depth, "border_width": border - 1e-9}
-                for i, height in enumerate((0.05, 0.08, 0.10, 0.12, 0.16))}
-               for label, depth, border in (("018", 0.18, 0.95), ("021", 0.21, 1.07),
-                                           ("025", 0.25, 1.00), ("028", 0.28, 1.07))
-               for direction in ("up", "down")},
-            "slope_outward_up": {f"l{i}": {"gradient": gradient}
-                                 for i, gradient in enumerate((0.0, 0.4 / 3, 0.8 / 3, 0.4))},
-            "slope_outward_down": {f"l{i}": {"gradient": gradient}
-                                   for i, gradient in enumerate((0.0, 0.4 / 3, 0.8 / 3, 0.4))},
-        }
-        defaults = {
-            "random_rough": {"noise_step": 0.005, "horizontal_scale": 0.1, "vertical_scale": 0.005,
-                             "downsampled_scale": None, "border_width": 0.25},
-            "stairs": {"platform_width": 2.5, "holes": False},
-            "slope": {"platform_width": 2.0, "border_width": 0.25,
-                      "horizontal_scale": 0.1, "vertical_scale": 0.001},
-        }
+        curriculum = True
+        curriculum_iterations = 12000
+        field_resolution_m = 0.02
+        field_half_m = 6.5
+        field_cache_dir = "logs/heightfields"
         scan_size_m = (1.2, 0.72)
         scan_resolution_m = 0.12
 
     class domain_randomization:
-        """摩擦取指定Go2参考；编码器和COM幅度取论文表A.3，无外力push。"""
+        """按指定Go2参考的MjLab基类随机化，不加入外力push。"""
 
         enabled = True
         friction_range = (0.3, 1.5)
-        encoder_bias_range = (-0.01, 0.01)
-        com_range = {"x": (-0.025, 0.025), "y": (-0.05, 0.05), "z": (-0.05, 0.05)}
+        spin_friction_range = (1e-4, 2e-2)
+        roll_friction_range = (1e-5, 5e-3)
+        encoder_bias_range = (-0.015, 0.015)
+        com_range = {"x": (-0.025, 0.025), "y": (-0.025, 0.025), "z": (-0.03, 0.03)}
 
     class commands:
-        """论文附录G的均匀速度命令支路；坐标为heading平移与world yaw。"""
+        """HIM采样及heading反馈；既有奖励仍评价heading平移与world yaw。"""
 
         reference_steps_per_iteration = 1
-        initial_ranges = ((-1.5, 2.0), (-1.32, 1.32), (-3.35, 3.35))
+        initial_ranges = ((-1.0, 1.0), (-1.0, 1.0), (-2.0, 2.0))
         stages = []
         zero_probability_start = 0.1
         zero_probability_end = 0.1
         zero_probability_iterations = 1
-        resampling_time = (5.0, 5.0)
-        terrain_limits = {name: (2.0, 1.32, 3.35) for name in ("flat", "stairs", "slope", "random_rough")}
-        heading_command = False
+        resampling_time = (4.0, 12.0)
+        heading_command = True
+        heading_range = (-3.14, 3.14)
+        heading_control_stiffness = 0.5
+        rel_heading_envs = 1.0
+        rel_standing_envs = 0.1
+        rel_forward_envs = 0.05
 
     class reward:
-        """表A.6的六项奖励，Go2倾倒阈值和软化宽度取参考实现。"""
+        """保留表A.6六项并添加指定HIM奖励；各项先返回奖励率。"""
 
         tracking_linear_variance = 0.5 ** 2
         tracking_angular_variance = 0.5
         fall_angle = math.radians(70)
         fall_softness_deg = 5.0
+        stand_still_command_threshold = 0.1  # 平移命令模长加偏航命令绝对值不超过此值时启用。
+
+        class gait:
+            """相位按来源足名配置；软接触只用于想象近似。"""
+
+            period = 0.6
+            offsets = {"FR": 0.0, "FL": 0.5, "RR": 0.5, "RL": 0.0}
+            stance_fraction = 0.56
+            command_threshold = 0.1
+            contact_height = 0.035  # 指定参考train.py稀有窗口采用的足端中心触地阈值，米。
+            contact_softness = 0.005  # 想象接触过渡宽度，米；属于本次软化适配。
+
+        class posture:
+            walking_threshold = 0.1
+            running_threshold = 1.5
+            std_standing = {"hip": 0.05, "thigh": 0.1, "calf": 0.15}
+            std_walking = {"hip": 0.15, "thigh": 0.35, "calf": 0.5}
+            std_running = {"hip": 0.15, "thigh": 0.35, "calf": 0.5}
 
         class scales:
             track_linear_velocity = 2.0
@@ -202,3 +208,10 @@ class Go2ReferenceCfg(BaseConfig):
             joint_pos_limits = -2.0
             torso_sideways_lean = -4.0
             body_ang_vel = -0.05
+            foot_gait = 0.5
+            feet_air_time = 0.2
+            pose = 1.0
+            lin_vel_z = -2.0
+            body_orientation_l2 = -0.2
+            smoothness = -0.01
+            stand_still = -0.5

@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-import re
+from tempfile import TemporaryDirectory
 
 import torch
 
+from .deployment import export_checkpoint
 from .playback import make_playback
 
 
@@ -47,11 +48,10 @@ def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="actor", dev
         torch.manual_seed(env.adapter.cfg.env.seed)
         observations = env.reset()
         count = math.ceil(seconds / env.adapter.step_dt)
-        version = re.fullmatch(r"model_(\d+)\.pt", checkpoint.name)
-        exported = checkpoint.parent / f"policy_{int(version.group(1))}.pt" if version is not None else None
-        parity = None
-        if exported is not None and exported.is_file():
-            deployed = torch.jit.load(str(exported), map_location="cpu")
+        # 训练目录不再保存策略副本，对拍用当场导出的TorchScript，避免依赖额外产物。
+        with TemporaryDirectory(prefix=".evaluation_parity_") as temporary:
+            exported = export_checkpoint(checkpoint, temporary)
+            deployed = torch.jit.load(str(exported["pt"]), map_location="cpu")
             expected = actor(observations).cpu()
             actual = deployed(observations["history"].flatten(1).cpu())
             torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-4)

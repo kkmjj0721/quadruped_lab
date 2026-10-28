@@ -52,3 +52,13 @@ def tracking_velocity(physical: Tensor) -> Tensor:
     """论文A.6命令坐标：heading平面速度和世界角速度z。"""
     world_yaw_rate = -(normalized_gravity(physical) * physical[..., ANGULAR_BODY]).sum(-1, keepdim=True)
     return torch.cat((physical[..., VELOCITY_HEADING][..., :2], world_yaw_rate), -1)
+
+
+def body_vertical_velocity(physical: Tensor) -> Tensor:
+    """由heading速度与机身重力恢复body-z速度；倾斜时不能直接取world-z。"""
+    gravity = normalized_gravity(physical)
+    gx, gy, gz = gravity.unbind(-1)
+    # heading以机身x轴的水平投影定向，norm(g_yz)对应非负cos(pitch)。
+    cosine_pitch = gravity[..., 1:].norm(dim=-1).clamp_min(1e-6)
+    body_z_heading = torch.stack((-gx * gz / cosine_pitch, gy / cosine_pitch, -gz), -1)
+    return (physical[..., VELOCITY_HEADING] * body_z_heading).sum(-1)

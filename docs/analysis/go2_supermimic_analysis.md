@@ -12,13 +12,13 @@
 | --- | --- |
 | **本项目已验证事实** | 在本工作区代码/配置/实际运行产物中直接读到或实际跑出，可复查 |
 | **论文依据** | 出自本地 [SuperMimic 英文 v1](../../paper/SuperMimic_2610.28480v1.pdf) 或中文笔记 [SuperMimic阅读笔记](../../paper/SuperMimic阅读笔记.md)，标注章节/表号 |
-| **参考项目依据** | 出自 `Zhengtianjin/go2-supermimic@d9eee9b3`、`wty-yy/go2_rl_gym@30e74dc` 的对应实现，本地经 [NOTICE](../../agents/supermimic/single/NOTICE.md) 与对照测试核对 |
+| **参考项目依据** | 出自 `Zhengtianjin/go2-supermimic@d9eee9b3`、`wty-yy/go2_rl_gym@30e74dc` 的对应实现，本地经 [NOTICE](../../agents/supermimic/NOTICE.md) 与对照测试核对 |
 | **推断／待验证假设** | 由上述事实推导、尚未实测；给出最小验证方法 |
 
 证据来源与时间边界：
 
-- 代码事实来自当前工作区（`git revision 291995eb`，工作区有未提交修改，见运行目录 `run_config.json`）。
-- 运行事实来自**当前 MoE 构建**的训练目录 `logs/supermimic/go2_supermimic/2026-10-27_19-28-11_197179/`（PID 499718，`Unitree-Go2-SuperMimic-Flat --num-envs 1024`，格式 `supermimic_moe_v1`）。训练指标固定在该目录 **iteration 3043 / 会话 83.7 min / real_steps 3 131 392**（`metrics.jsonl` 共 3043 条记录），这也是该 run 的**最后一条记录**：`max_iterations=10000`，实际在 3043 轮结束，最后一个检查点是 `model_3000.pt`（20:50 写出，`policy.json` 的 `iteration=3000`）。进程已不在运行，**结束原因未查明**——`metrics.jsonl` 里 3043 条记录全部完整（60 键）、`guard/rollback` 从未出现、最后一条记录的指标正常（`raw track_linear` 0.4944、`raw track_angular` 0.8173），没有数值异常或护栏触发的痕迹。终端日志块取样自同目录的早期迭代（iteration 1 与 1500），因此**终端块里的数字与 3043 快照不同属正常**，只是取样时点不同。
+- 代码事实来自当前工作区（`git revision 291995eb`，工作区有未提交修改；改造前的 run 记录见该 run 目录的 `run_config.json`，改造后写入事件文件 `run/origin` 面板）。
+- 运行事实来自**当前 MoE 构建**的训练目录 `logs/supermimic/go2_supermimic/2026-10-27_19-28-11_197179/`（PID 499718，`Unitree-Go2-SuperMimic-Flat --num-envs 1024`，格式 `supermimic_moe_v1`）。训练指标固定在该目录 **iteration 3043 / 会话 83.7 min / real_steps 3 131 392**（`metrics.jsonl` 共 3043 条记录；该 run 早于产物精简，之后不再产生 JSONL），这也是该 run 的**最后一条记录**：`max_iterations=10000`，实际在 3043 轮结束，最后一个检查点是 `model_3000.pt`（20:50 写出，`policy.json` 的 `iteration=3000`）。进程已不在运行，**结束原因未查明**——`metrics.jsonl` 里 3043 条记录全部完整（60 键）、`guard/rollback` 从未出现、最后一条记录的指标正常（`raw track_linear` 0.4944、`raw track_angular` 0.8173），没有数值异常或护栏触发的痕迹。终端日志块取样自同目录的早期迭代（iteration 1 与 1500），因此**终端块里的数字与 3043 快照不同属正常**，只是取样时点不同。
 - 另有旧目录 `logs/supermimic/go2_supermimic/2026-10-27_14-41-21_092524/`（1560 轮，格式 `supermimic_single_mlp_v1`，MoE 之前的历史构建）。它只能作为**历史对照**，不代表当前代码，文中凡引用均显式标注。
 - 单元测试 `tests.test_tasks.test_reference_supermimic_task` + `tests.test_agents.test_reference_supermimic`：`Ran 20 tests ... OK (skipped=1)`（CPU 环境）。
 
@@ -39,7 +39,7 @@
 
 | 层 | 位置 | 职责 | 不做什么 |
 | --- | --- | --- | --- |
-| 配置层 | [go2_reference_supermimic_config.py](../../src/config/go2/go2_reference_supermimic_config.py)、[single/config.py](../../agents/supermimic/single/config.py) | 唯一数值来源，可被 `--task-config` JSON 与 CLI 覆盖 | 不含执行逻辑 |
+| 配置层 | [go2_reference_supermimic_config.py](../../src/config/go2/go2_reference_supermimic_config.py)、[config.py](../../agents/supermimic/config.py) | 唯一数值来源，可被 `--task-config` JSON 与 CLI 覆盖 | 不含执行逻辑 |
 | 任务层 | [src/tasks/locomotion/go2_supermimic/](../../src/tasks/locomotion/go2_supermimic/) | Go2 专属 MDP、地形、课程、真实仿真装配 | 不含算法更新逻辑 |
 | 算法层 | [agents/supermimic/](../../agents/supermimic/) | 只认 `TaskState` 张量语义；网络、想象、回放、护栏、保存 | 不硬编码任何 Go2 常量 |
 | 入口层 | [scripts/train.py](../../scripts/train.py)、[scripts/play.py](../../scripts/play.py)、[rl/](../../src/tasks/locomotion/go2_supermimic/rl/) | 装配、日志目录、快照、播放、导出 | 不承载核心实现 |
@@ -83,7 +83,7 @@ observe(s) = [ ω_body(3) , gravity_body(3) , (q−q0)+encoder_bias(12) , q̇(12
 
 ### 2.3 history：225 = 45 × 5
 
-`history` 形状 `[N, 5, 45]`，帧序**旧→新**（`history_order = "frame_major_oldest_first"`），展平后 225 维直接进混专家编码器。reset 时用首帧复制填满（[runner.py:123-124](../../agents/supermimic/single/runner.py#L123-L124)、[runner.py:176](../../agents/supermimic/single/runner.py#L176)），避免“零填充”引入分布外输入。
+`history` 形状 `[N, 5, 45]`，帧序**旧→新**（`history_order = "frame_major_oldest_first"`），展平后 225 维直接进混专家编码器。reset 时用首帧复制填满（[runner.py:123-124](../../agents/supermimic/runner.py#L124-L125)、[runner.py:176](../../agents/supermimic/runner.py#L177)），避免“零填充”引入分布外输入。
 
 历史帧数被硬性约束为 5（[go_supermimic_env_cfg.py:41-42](../../src/tasks/locomotion/go2_supermimic/go_supermimic_env_cfg.py#L41-L42)），因为 `go2_rl_gym` 预训练权重按 5 帧训练；改帧数会使 `load_pretrained` 严格加载失败。
 
@@ -120,7 +120,7 @@ model_input = [ physical[0:70](70) , action(12) , a_prev(12) , context16 , scan(
 
 ### 3.1 动作语义
 
-- 策略输出 12 维**无界线性**输出，无 tanh、无 clip、无动作限幅配置项（**本项目已验证事实**；`Mlp` 最后一层是裸 `nn.Linear`，见 [models.py:47-62](../../agents/supermimic/single/models.py#L47-L62)）。下发动作同时被写入 `memory.a_prev`，成为下一步观测的一部分——**动作历史闭环**是真实/想象一致的必要条件。
+- 策略输出 12 维**无界线性**输出，无 tanh、无 clip、无动作限幅配置项（**本项目已验证事实**；`Mlp` 最后一层是裸 `nn.Linear`，见 [models.py:47-62](../../agents/supermimic/policy.py#L13-L28)）。下发动作同时被写入 `memory.a_prev`，成为下一步观测的一部分——**动作历史闭环**是真实/想象一致的必要条件。
 - 关节目标：`q_target = q_default + a ⊙ scale − encoder_bias`。**下发链路里没有对 `q_target` 做软限位裁剪**：`JointPositionActionCfg` 未设 `clip`（[go_supermimic_env_cfg.py:68-75](../../src/tasks/locomotion/go2_supermimic/go_supermimic_env_cfg.py#L68-L75)），`set_joint_position_target` 直接写入 `joint_pos_target`（`.venv/.../mjlab/entity/entity.py:1054-1072`），PD 力矩由 `dc_motor_clip` 按 `saturation_effort` 与转速-力矩曲线限幅（`.venv/.../mjlab/actuator/dc_actuator.py:126-135`）。软限位只在两处出现：`reset_joints_by_offset` 的初始位置裁剪（`.venv/.../mjlab/envs/mdp/events.py:297-298`）与任务模型的 `joint_pos_limits` 惩罚项（后者用的正是 `soft_joint_pos_limits`，见 [transition_adapter.py:65](../../src/tasks/locomotion/go2_supermimic/rl/transition_adapter.py#L65)）。所以“越界”在物理上是允许的，只是要付奖励代价——这是**本项目已验证事实**，也是 §7.1 里 `joint_pos_limits` 权重 −2 的实际作用方式。
 - 动作尺度 `scale = 0.25 · effort_limit / Kp`（**参考项目依据**，[config:108-109](../../src/config/go2/go2_reference_supermimic_config.py#L108-L109)）：hip/thigh `0.33490`、calf `0.28532`。
 
@@ -304,7 +304,7 @@ model_input = [ physical[0:70](70) , action(12) , a_prev(12) , context16 , scan(
 
 ## 9. 网络结构
 
-三张网络都在 [agents/supermimic/single/models.py](../../agents/supermimic/single/models.py)，参数量按 `model_1500.pt` 的 `state_dict` 元素计数（**本项目已验证事实**）：
+三张网络分布在 [policy.py](../../agents/supermimic/policy.py)（actor 与 critic）和 [world_model.py](../../agents/supermimic/world_model.py)（归一化世界模型）(../../agents/supermimic/policy.py)，参数量按 `model_1500.pt` 的 `state_dict` 元素计数（**本项目已验证事实**）：
 
 | 模块 | 输入 → 输出 | 参数量（含 buffer） | 结构 |
 | --- | --- | --- | --- |
@@ -321,7 +321,7 @@ model_input = [ physical[0:70](70) , action(12) , a_prev(12) , context16 , scan(
 
 ### 9.1 MoE 历史编码器
 
-前向（[models.py:161-165](../../agents/supermimic/single/models.py#L161-L165)）：
+前向（[models.py:161-165](../../agents/supermimic/policy.py#L127-L131)）：
 
 ```
 h = flatten(history 5×45) → 225
@@ -334,40 +334,40 @@ a  = Mlp(512,256,128)( [ z(32) ; frame_normalizer(o_t)(45) ] )   # 77 → 12
 
 - **两套独立归一化**：历史 225 与当前帧 45 分别统计。当前帧单独归一化是 `go2_rl_gym` 的 student 分工（**参考项目依据**），不是冗余——历史统计的均值/方差被 5 帧混合，直接用当前帧会偏移。
 - **L2Norm 而非 tanh**：潜变量投影到单位球面，与 `norm_type='l2norm'` 一致（**参考项目依据**）。潜变量范数恒定，使下游 MLP 的输入尺度可预测。
-- **负载均衡**：`load_balance_loss = mean((usage_k − 1/8)²)`，只反传门控（[models.py:167-173](../../agents/supermimic/single/models.py#L167-L173)）。系数 0.01，按**整个 8192 批次**统计 usage，与参考实现的“总批量语义”一致。
-- **键名对齐**：`load_pretrained` 显式映射到 `go2_rl_gym` 导出名（含 `network.0/2/4` 层级与展平 TorchScript 键），严格加载、缺一即报错（[models.py:175-214](../../agents/supermimic/single/models.py#L175-L214)）。因此可以直接用其预训练权重热启动；当前 run **未使用**该功能（`runner.driver.policy` 为空，`load_pretrained` 未被调用）。
+- **负载均衡**：`load_balance_loss = mean((usage_k − 1/8)²)`，只反传门控（[models.py:167-173](../../agents/supermimic/policy.py#L133-L138)）。系数 0.01，按**整个 8192 批次**统计 usage，与参考实现的“总批量语义”一致。
+- **键名对齐**：`load_pretrained` 显式映射到 `go2_rl_gym` 导出名（含 `network.0/2/4` 层级与展平 TorchScript 键），严格加载、缺一即报错（[models.py:175-214](../../agents/supermimic/policy.py#L141-L178)）。因此可以直接用其预训练权重热启动；当前 run **未使用**该功能（`runner.driver.policy` 为空，`load_pretrained` 未被调用）。
 
 ### 9.2 World model
 
 - 输出 73 = `70 维状态增量 + 3 维平面位姿增量`；位姿增量在**起始航向系**表达（`pose_delta`），因此模型不需要自己学旋转不变性。
-- 前向：`delta = output_norm.unnormalize(net(input_norm(input)))`，再 `integrate` + `advance`（[models.py:251-256](../../agents/supermimic/single/models.py#L251-L256)）。`integrate` 只做加法，`advance` 负责写动作/时钟/命令重采样——**动力学网络只学物理转移，不学奖励、不学失败头**（与论文一致：奖励和终止由任务规则计算，不由学习模型预测；**论文依据** §3.2）。
-- 损失：8 步自回归，误差按 `output_norm.var.sqrt()` 归一化后取 MSE，乘 `valid` 掩码求和除以有效步数（[models.py:258-272](../../agents/supermimic/single/models.py#L258-L272)）。**物理状态回喂预测值、记忆与命令用记录值**——这是“模型可以自我滚动，但外生过程不自我欺骗”的关键设计（论文用同样的多步拟合思路，**论文依据** 表 A.5 `k=8`）。
+- 前向：`delta = output_norm.unnormalize(net(input_norm(input)))`，再 `integrate` + `advance`（[models.py:251-256](../../agents/supermimic/world_model.py#L64-L69)）。`integrate` 只做加法，`advance` 负责写动作/时钟/命令重采样——**动力学网络只学物理转移，不学奖励、不学失败头**（与论文一致：奖励和终止由任务规则计算，不由学习模型预测；**论文依据** §3.2）。
+- 损失：8 步自回归，误差按 `output_norm.var.sqrt()` 归一化后取 MSE，乘 `valid` 掩码求和除以有效步数（[models.py:258-272](../../agents/supermimic/world_model.py#L71-L85)）。**物理状态回喂预测值、记忆与命令用记录值**——这是“模型可以自我滚动，但外生过程不自我欺骗”的关键设计（论文用同样的多步拟合思路，**论文依据** 表 A.5 `k=8`）。
 - 训练态 `supervised_model_input` 用记录位姿的地形 relief，避免“预测高度 → 扫描 → 再预测”在训练时就引入自反馈偏差。
 
 ## 10. 训练迭代与想象训练
 
 ![图3 单轮训练迭代](figures/03-iteration.png)
 
-`SingleRunner.learn`（[runner.py:255-315](../../agents/supermimic/single/runner.py#L255-L315)）每轮顺序：**采集 → 世界模型拟合 → 想象策略改进 → critic → 护栏 → 日志**。
+`SuperMimicRunner.learn`（[runner.py:255-315](../../agents/supermimic/runner.py#L256-L316)）每轮顺序：**采集 → 世界模型拟合 → 想象策略改进 → critic → 护栏 → 日志**。
 
 ### 10.1 采集与探索
 
-- 首轮 `initial_collection_steps=16` 步，之后每轮 1 步（[runner.py:263](../../agents/supermimic/single/runner.py#L263)）。16 步是为了同时满足历史 5 帧与 8 步窗口（`ready` 要求 `size ≥ 8+5−1 = 12`，[replay.py:81-82](../../agents/supermimic/single/replay.py#L81-L82)）。
-- 噪声：前 `explore_frac=0.25` 的环境用 **OU 过程**（`θ=2.0, σ=0.3`，`θ·dt=0.04 < 2` 有校验），其余 `N(0, 0.1²)`（[runner.py:150-155](../../agents/supermimic/single/runner.py#L150-L155)）。OU 让部分环境产生时间相关的探索轨迹，比白噪声更容易激发接触切换；论文采集用 `N(0,0.1²)`（**论文依据** 表 A.5），OU 是参考仓库的做法（**参考项目依据**）。
+- 首轮 `initial_collection_steps=16` 步，之后每轮 1 步（[runner.py:263](../../agents/supermimic/runner.py#L264)）。16 步是为了同时满足历史 5 帧与 8 步窗口（`ready` 要求 `size ≥ 8+5−1 = 12`，[replay.py:81-82](../../agents/supermimic/buffer.py#L81-L82)）。
+- 噪声：前 `explore_frac=0.25` 的环境用 **OU 过程**（`θ=2.0, σ=0.3`，`θ·dt=0.04 < 2` 有校验），其余 `N(0, 0.1²)`（[runner.py:150-155](../../agents/supermimic/runner.py#L151-L156)）。OU 让部分环境产生时间相关的探索轨迹，比白噪声更容易激发接触切换；论文采集用 `N(0,0.1²)`（**论文依据** 表 A.5），OU 是参考仓库的做法（**参考项目依据**）。
 - 每步同时：`replay.add`、`model.update_stats`、`actor.update_statistics`。三个 RunningNorm 都在**采集热路径**更新，保证训练/部署归一化一致。
 
 ### 10.2 回放与稀有事件归档
 
-- `Replay` 存 `capacity(1000) × num_envs` 的环形转移，观测用 **float16** 省显存（[replay.py:43-107](../../agents/supermimic/single/replay.py#L43-L107)）；按“行”存而非按样本存，采样时按逻辑槽位取连续 8 步窗口，天然保留同一环境的时序。
+- `Replay` 存 `capacity(1000) × num_envs` 的环形转移，观测用 **float16** 省显存（[replay.py:43-107](../../agents/supermimic/buffer.py#L43-L107)）；按“行”存而非按样本存，采样时按逻辑槽位取连续 8 步窗口，天然保留同一环境的时序。
 - 采样：`sample_seeds` 取想象种子（当前状态 + 5 帧历史，历史长度受 `age` 限制，reset 后重复首帧）；`sample_windows` 取 8 步窗口，`valid` 从第一条记录起累积、遇 `terminated` 截断。
-- 世界模型 batch = 2048 = **1024 均匀 + 512 优先 + 512 归档**（[runner.py:201-219](../../agents/supermimic/single/runner.py#L201-L219)）。优先分 = **接触翻转数 + 腾空帧数 + 4×跌倒**（[reference_task.py:228-231](../../src/tasks/locomotion/go2_supermimic/mdp/reference_task.py#L228-L231)）；从 4× 候选里 topk，并以 2% 概率把“值得归档”的窗口存进 `WindowArchive`（10 万容量，懒分配）。归档条件（[reference_task.py:233-236](../../src/tasks/locomotion/go2_supermimic/mdp/reference_task.py#L233-L236)）是三者之一：**≥2 帧四足全腾空**、**任一帧 `|v_z| > 0.6 m/s`**、**真实跌倒**。
+- 世界模型 batch = 2048 = **1024 均匀 + 512 优先 + 512 归档**（[runner.py:201-219](../../agents/supermimic/runner.py#L202-L220)）。优先分 = **接触翻转数 + 腾空帧数 + 4×跌倒**（[reference_task.py:228-231](../../src/tasks/locomotion/go2_supermimic/mdp/reference_task.py#L228-L231)）；从 4× 候选里 topk，并以 2% 概率把“值得归档”的窗口存进 `WindowArchive`（10 万容量，懒分配）。归档条件（[reference_task.py:233-236](../../src/tasks/locomotion/go2_supermimic/mdp/reference_task.py#L233-L236)）是三者之一：**≥2 帧四足全腾空**、**任一帧 `|v_z| > 0.6 m/s`**、**真实跌倒**。
 
   `hard_motion` 取 `physical[..., VELOCITY_HEADING][..., 2]` 即 `slice(4,7)` 的第 3 个分量。`VELOCITY_HEADING` 存的是 `yaw_rotate_inverse(root_link_lin_vel_w)` 的 3 个分量，绕 z 旋转不改变 z 分量，所以这一维就是**世界系垂向速度 `v_z`**（`physical` 里没有单独的 `vz` 槽位，它藏在这里）。判定阈值 0.6 m/s 与 `flight`/`contact` 互补：`flight` 看“四足全离地”，`hard_motion` 看“机身竖直方向动得快”，后者覆盖腾空相与落地冲击。
 - `archive_size` 实测稳步增长：迭代 1500 时 **4087**，迭代 2087 时 **15 385**（**本项目已验证事实**）。由于 `archive_keep_prob=0.02` 很小，早期增长慢，随跌倒/腾空样本累积而加快；它代表“稀有事件库”，不是重复采样。
 
 ### 10.3 想象与 BPTT
 
-`Imagination`（[imagination.py](../../agents/supermimic/single/imagination.py)）：
+`Imagination`（[imagination.py](../../agents/supermimic/imagine.py)）：
 
 ```
 for t in 0..31:
@@ -381,13 +381,13 @@ objective = Σ γ^t·survival_t·r_t + γ^32·survival_32·V(s_32)
 ```
 
 - `torch.compile(backend="inductor", fullgraph=True)` 编译 `_step`（`compile_imagination=True`），rollout 是 32 次调用。
-- 8192 条种子分 `imag_microbatch=256` 段反传，**每段保留完整 32 步时间反传**，尾段按样本数加权，整批只 `step()` 一次（[learner.py:80-121](../../agents/supermimic/single/learner.py#L80-L121)）。这是显存与语义的折中：不截断 BPTT，只切分 batch。
-- lambda-return 用**同一次 rollout 的 critic 快照**（`@torch.no_grad`），递推 `r + γ(1−fail)((1−λ)V + λ·tail)`（[imagination.py:60-71](../../agents/supermimic/single/imagination.py#L60-L71)）。直接乘 `(1−fail)` 而不是除以 `survival`，避免存活率趋零时的数值下溢——这是一个实现上的稳健性改进。
-- critic 拟合：特征 `[8192×32 (+1 端点)] × 179`，5 epoch × 4 minibatch，内部再按 4096 分块控制峰值显存；`normalizer.update` 只在**目标固定后**做一次（[learner.py:124-149](../../agents/supermimic/single/learner.py#L124-L149)）。
+- 8192 条种子分 `imag_microbatch=256` 段反传，**每段保留完整 32 步时间反传**，尾段按样本数加权，整批只 `step()` 一次（[learner.py:80-121](../../agents/supermimic/learner.py#L80-L121)）。这是显存与语义的折中：不截断 BPTT，只切分 batch。
+- lambda-return 用**同一次 rollout 的 critic 快照**（`@torch.no_grad`），递推 `r + γ(1−fail)((1−λ)V + λ·tail)`（[imagination.py:60-71](../../agents/supermimic/imagine.py#L60-L71)）。直接乘 `(1−fail)` 而不是除以 `survival`，避免存活率趋零时的数值下溢——这是一个实现上的稳健性改进。
+- critic 拟合：特征 `[8192×32 (+1 端点)] × 179`，5 epoch × 4 minibatch，内部再按 4096 分块控制峰值显存；`normalizer.update` 只在**目标固定后**做一次（[learner.py:124-149](../../agents/supermimic/learner.py#L124-L149)）。
 
 ### 10.4 学习率与更新门控
 
-`schedule`（[learner.py:55-67](../../agents/supermimic/single/learner.py#L55-L67)）：
+`schedule`（[learner.py:55-67](../../agents/supermimic/learner.py#L55-L67)）：
 
 ```
 rate  = 2e-4 · (0.03 + 0.97·0.5·(1+cos(π·min(1, it/30000))))   # 余弦退火到 3%
@@ -404,7 +404,7 @@ actor_lr = rate · ramp;  model_lr = critic_lr = rate
 
 ### 10.5 塌缩护栏
 
-`_collapse_guard`（[runner.py:221-253](../../agents/supermimic/single/runner.py#L221-L253)）：每 `collapse_interval=50` 轮统计窗口平均 `failures`（**每轮失败行数**，非每环境分钟），若 `> collapse_falls=3.0` 且已有安全策略快照，**连续 2 个窗口**命中则：恢复 actor+critic 权重、重建这两个 Adam、`lr_multiplier ×= 0.5`、`ramp_start = iteration`、**保留世界模型**。注释明确说明保留 WM 的理由：WM 刚学到导致崩溃的真实样本，回滚它会让同一策略被再次利用。
+`_collapse_guard`（[runner.py:221-253](../../agents/supermimic/runner.py#L222-L254)）：每 `collapse_interval=50` 轮统计窗口平均 `failures`（**每轮失败行数**，非每环境分钟），若 `> collapse_falls=3.0` 且已有安全策略快照，**连续 2 个窗口**命中则：恢复 actor+critic 权重、重建这两个 Adam、`lr_multiplier ×= 0.5`、`ramp_start = iteration`、**保留世界模型**。注释明确说明保留 WM 的理由：WM 刚学到导致崩溃的真实样本，回滚它会让同一策略被再次利用。
 
 当前 run 全程 `rollbacks = 0`；`guard/falls_per_iteration` 每 50 轮记录一次，共 41 条，峰值 **1.56**（迭代 1650），未触及 3.0 阈值（**本项目已验证事实**）。所以护栏**未实际触发过**，不能作为“已验证有效”的证据，只能说“未误触发”。
 
@@ -450,7 +450,7 @@ actor_lr = rate · ramp;  model_lr = critic_lr = rate
 
 设计要点：
 
-- **`Mean reward` 是“已完成回合的平均回报”，不是每步奖励**。因为它来自 `episode/return_mean`（`completed_episodes` deque maxlen 100，[runner.py:185-191](../../agents/supermimic/single/runner.py#L185-L191)）。前几个回合没结束时这一行整个缺失（不是 0）。下面这个真实的迭代 1 分块就同时缺 `Mean value loss`/`Mean control loss`/`Control learning rate`/`Mean reward`/`Mean episode length` 五行——不是 bug，而是“还没完成回合、actor 还没启动”：
+- **`Mean reward` 是“已完成回合的平均回报”，不是每步奖励**。因为它来自 `episode/return_mean`（`completed_episodes` deque maxlen 100，[runner.py:185-191](../../agents/supermimic/runner.py#L186-L192)）。前几个回合没结束时这一行整个缺失（不是 0）。下面这个真实的迭代 1 分块就同时缺 `Mean value loss`/`Mean control loss`/`Control learning rate`/`Mean reward`/`Mean episode length` 五行——不是 bug，而是“还没完成回合、actor 还没启动”：
 
   ```
   ################################################################################
@@ -481,12 +481,12 @@ actor_lr = rate · ramp;  model_lr = critic_lr = rate
   ```
 
 - **`Reward/*` 是加权后的每步贡献**（`dt × scale × raw`），可直接相加得到 `real_reward`。实测迭代 1500：`0.00701+0.02394−0.00481−0.00052−0.00134−0.00216 = 0.02212 = real_reward 0.02211`（舍入差），**账面自洽**。
-- `Training phase` 只在 `replay warmup`（replay 未就绪，需要 12 步）或 `world-model only`（actor 未启动，前 300 轮）时出现。本项目首轮就采 16 步 ≥ 12，所以 `replay warmup` **从未出现**（`metrics.jsonl` 里 `model_not_ready` 键出现 0 次），只有第 1–300 轮显示 `world-model only`。
-- 打印时机：`_records == 1`（首轮）、`iteration % log_interval == 0`、`iteration == target` 三者之一（[logging.py:128-137](../../agents/supermimic/logging.py#L128-L137)）。当前 `log_interval=1` → 每轮都打印。
+- `Training phase` 只在 `replay warmup`（replay 未就绪，需要 12 步）或 `world-model only`（actor 未启动，前 300 轮）时出现。本项目首轮就采 16 步 ≥ 12，所以 `replay warmup` **从未出现**（历史 run 的 `model_not_ready` 键出现 0 次），只有第 1–300 轮显示 `world-model only`。
+- 打印时机：`_records == 1`（首轮）、`iteration % log_interval == 0`、`iteration == target` 三者之一（[logging.py](../../agents/supermimic/logging.py)）。当前 `log_interval=1` → 每轮都打印。
 
-### 11.2 JSONL：键数随训练阶段分三段增长（42 → 56 → 60）
+### 11.2 TensorBoard 标量：键数随训练阶段分三段增长（42 → 56 → 60）
 
-`metrics.jsonl` 每轮一行，`allow_nan=False`，非有限值直接抛错（[logging.py:22-39](../../agents/supermimic/logging.py#L22-L39)）。**键数不是恒定的**，而是随“该阶段有什么可记”增长（**本项目已验证事实**，对全 3043 条记录统计）：
+每轮的完整数值写入运行目录唯一的 `events.out.tfevents.*`（tag 即指标名，step 即迭代号），非有限值在写入前抛错（[logging.py](../../agents/supermimic/logging.py)）。训练目录已不再保存 `metrics.jsonl`；下表 42/56/60 的统计来自改造前的历史 run 逐轮记录，改造后同一批指标以标量形式写入事件文件。**键数不是恒定的**，而是随“该阶段有什么可记”增长（**本项目已验证事实**，对历史 run 全 3043 条记录统计）：
 
 | 迭代区间 | 普通记录键数 | 每 50 轮多一个 | 原因 |
 | --- | --- | --- | --- |
@@ -494,7 +494,7 @@ actor_lr = rate · ramp;  model_lr = critic_lr = rate
 | 301–416 | **56** | 57 | 第 301 轮起 `policy_start=300` 生效，补上 `control_*`、`critic_*`、`imagination/*`、`episode/*`、`execution/*` |
 | 417–3043 | **60** | 61 | 第 417 轮补上 `episode/return_mean`、`episode/length_steps_mean`、`episode/length_seconds_mean`、`episode/window_count` 后稳定 |
 
-`episode/*` 迟到 117 轮的原因不是“攒够 100 个”，而是**直到第 417 轮才出现第一个终止的回合**：`deque(maxlen=100)` 在 [runner.py:84](../../agents/supermimic/single/runner.py#L84) 初始化、只在 [runner.py:187-192](../../agents/supermimic/single/runner.py#L187-L192) 非空时才写键，而迭代 1–416 的 `failures` 与 `timeouts` **累计为 0**。第 417 轮的 `failures = 1` 是第一条记录，此后该键常驻。
+`episode/*` 迟到 117 轮的原因不是“攒够 100 个”，而是**直到第 417 轮才出现第一个终止的回合**：`deque(maxlen=100)` 在 [runner.py:84](../../agents/supermimic/runner.py#L85) 初始化、只在 [runner.py:187-192](../../agents/supermimic/runner.py#L188-L193) 非空时才写键，而迭代 1–416 的 `failures` 与 `timeouts` **累计为 0**。第 417 轮的 `failures = 1` 是第一条记录，此后该键常驻。
 
 进一步核对可知那条只能是一次**摔倒**而不是超时：第 417 轮时 `real_steps / 1024 = 432` 个控制步，远小于 `episode_length_s / dt = 1000`，回合到期截断在数学上还不可能发生。也就是说策略**在最初 416 轮（43 万个环境步）里一次都没摔过**——因为它基本站着不动；第一次摔倒是开始学动作之后的事。这是“策略从静止起步”的又一个独立佐证。
 
@@ -531,9 +531,11 @@ actor_lr = rate · ramp;  model_lr = critic_lr = rate
 
 ### 11.3 产物清单
 
-一次 run 目录（**本项目已验证事实**）：`config.json`（算法预算）、`execution.json`（microbatch）、`task_config.json`（完整任务配置 + `spec_hash` + `geometry_hash` + 每个 .py 的 sha256）、`run_config.json`（CLI、git revision/status、python/torch 版本）、`source_manifest.json` + `sources.zip`（源码快照，防“代码变了无法重建”）、`metrics.jsonl`、`model_N.pt` + `policy_N.{pt,onnx,json}` + 最新 `policy.*`。
+一次 run 目录（**本项目已验证事实**，改造后实测）：`model_N.pt`、唯一的 `events.out.tfevents.*`、`task_config.json`（完整任务配置 + `spec_hash` + `geometry_hash`，播放与续训依赖）。运行来源（CLI、git revision/status、python/torch 版本、算法预算与 microbatch）写入事件文件的 `run/origin` 与 `run/configuration` 文本面板，不再单独落 JSON。
 
-`model_1500.pt` 约 47 MB（三个网络 + 优化器状态 + RNG），`policy_1500.pt` 约 5.2 MB（仅 TorchScript actor）。
+对比：改造前一次 run 有 30 个文件、347 MB（`config.json`、`execution.json`、`run_config.json`、`source_manifest.json`、`sources.zip`、`metrics.jsonl`、`model_N.pt` ×6、`policy_N.{pt,onnx,json}` ×6 组 + 最新一组）；改造后同样规模只剩检查点与事件文件，参考项目 `Zhengtianjin/go2-supermimic` 的目录形态一致。
+
+`model_1500.pt` 约 47 MB（三个网络 + 优化器状态 + RNG）；部署策略不再随检查点落盘，需要时用 `tools/export_supermimic_policy.py` 显式导出（`policy_N.{pt,onnx,json}`，每份约 5.2 MB + 5.2 MB + 3.3 KB）。
 
 ## 12. 入口设计
 
@@ -567,7 +569,7 @@ CLI 别名兼容（[train_cfg.py](../../src/tasks/locomotion/go2_supermimic/conf
 ### 12.3 评估与导出
 
 - `evaluate_policy`（[evaluation.py:28-126](../../src/tasks/locomotion/go2_supermimic/rl/evaluation.py#L28-L126)）：四条固定命令 `(0.5,0,0)`、`(−0.5,0,0)`、`(0,0.5,0)`、`(0,0,0.5)`，`num_envs≥4`（每组至少 1 个），默认 32 环境 300 步；输出每组的 `mean_vx/vy/yaw`、`linear/yaw RMSE`、首回合时长/失败比例/删失比例、`failures`、每环境分钟摔倒率、`action_rms`、`action_abs_max`、TorchScript 对拍误差。这是唯一能把“训练指标”翻译成“物理表现”的工具。
-- `export_policy`（[export.py:14-57](../../agents/supermimic/single/export.py#L14-L57)）：deepcopy 到 CPU eval → 元数据 dict（格式、迭代号、输入输出名与形状、历史序、归一化公式 `clamp((x−mean)/(sqrt(var)+1e-6), −10, 10)`、动作语义 `unscaled_joint_position_offsets`、编码器块）→ TorchScript `policy_N.pt` → ONNX opset 18 动态 batch + `metadata_props` → `onnx.checker` → 原子 `os.replace`（先写 `policy_N.*` 再更新 `policy.*`，避免半写状态被播放读到）。
+- `export_policy`（[export.py:14-57](../../agents/supermimic/export.py#L14-L57)）：deepcopy 到 CPU eval → 元数据 dict（格式、迭代号、输入输出名与形状、历史序、归一化公式 `clamp((x−mean)/(sqrt(var)+1e-6), −10, 10)`、动作语义 `unscaled_joint_position_offsets`、编码器块）→ TorchScript `policy_N.pt` → ONNX opset 18 动态 batch + `metadata_props` → `onnx.checker` → 原子 `os.replace`（先写 `policy_N.*` 再更新 `policy.*`，避免半写状态被播放读到）。
 
 部署元数据里两条容易忽略但很关键的信息：
 

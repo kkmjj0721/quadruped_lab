@@ -1,6 +1,6 @@
 digraph G {
   graph [rankdir=TB, nodesep=0.28, ranksep=0.30, fontname="Noto Sans CJK SC", fontsize=14,
-         label="图3  SuperMimic 单轮训练迭代（SingleRunner.learn）", labelloc="t"];
+         label="图3  SuperMimic 单轮训练迭代（SuperMimicRunner.learn）", labelloc="t"];
   node [fontname="Noto Sans CJK SC", fontsize=10, shape=box, style="rounded,filled", fillcolor="#eef4fb", color="#3f6fa8"];
   edge [fontname="Noto Sans CJK SC", fontsize=8, color="#4a4a4a"];
 
@@ -42,8 +42,8 @@ digraph G {
     label="D 记账、护栏与日志"; style="rounded,dashed"; color="#8a8a8a"; fontsize=10;
     t1 [label="统计：real_steps、imagined_steps、更新计数、\ntiming、ETA、real/imagined fps"];
     t2 [label="collapse guard：每 50 轮平均 falls\n连续 2 次 > 3 → 回滚 actor/critic，lr × 0.5"];
-    t3 [label="TrainingLogger.record\n→ metrics.jsonl 每轮 + 终端每 log_interval"];
-    t4 [label="iteration % save_interval == 0 → save\nmodel_N.pt + policy_N.{pt,onnx,json}"];
+    t3 [label="TrainingLogger.record\n→ 事件文件逐 tag 写标量 + 终端每 log_interval"];
+    t4 [label="iteration % save_interval == 0 → save\n只写 model_N.pt（部署策略另行显式导出）"];
     t1 -> t2 -> t3 -> t4;
   }
 

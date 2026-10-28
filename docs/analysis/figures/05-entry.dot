@@ -9,9 +9,9 @@ digraph G {
     t0 [label="normalize_train_arguments\n兼容 --env.scene.num-envs / --agent.* / --gpu-ids 等别名", fillcolor="#fdf6e3"];
     t1 [label="SuperMimicTrainConfig\ndevice / num_envs / seed / max_iterations / save_interval\nlog_interval / imag_microbatch / critic_microbatch\nlog_root / experiment_name / run_name / --task-config / --resume / --model-only", fillcolor="#fdf6e3"];
     t2 [label="_validate_arguments → _resolve_task_config\n任务ID→flat|rough；JSON 快照可覆盖网络与预算；validate_config 校验"];
-    t3 [label="launch_training\n建 logs/supermimic/go2_supermimic/<时间戳>/，写 run_config.json\n+ source_manifest.json + sources.zip（源码快照，防不可重建）"];
-    t4 [label="make_go2_supermimic_runner\n→ Go2TransitionAdapter（环境/地形/课程/任务）\n→ Go2SingleActorRunner（actor/WM/critic/replay）\n→ task_config.json（config + spec_hash + geometry_hash + 源码 hash）"];
-    t5 [label="runner.learn(max_iterations)\n每 save_interval 存 model_N.pt，末轮必存；同时 export_policy"];
+    t3 [label="launch_training\n建 logs/supermimic/go2_supermimic/<时间戳>/，运行来源\n写入事件文件 run/origin 与 run/configuration"];
+    t4 [label="make_go2_supermimic_runner\n→ Go2TransitionAdapter（环境/地形/课程/任务）\n→ Go2SuperMimicRunner（actor/WM/critic/replay）\n→ task_config.json（config + spec_hash + geometry_hash）"];
+    t5 [label="runner.learn(max_iterations)\n每 save_interval 存 model_N.pt，末轮必存\n（不再随检查点导出策略副本）"];
     t0 -> t1 -> t2 -> t3 -> t4 -> t5;
   }
 
@@ -28,11 +28,11 @@ digraph G {
   subgraph cluster_eval {
     label="评估与部署（不进入训练循环）"; style="rounded,dashed"; color="#8a8a8a";
     e1 [label="rl/evaluation.py  evaluate_policy\n四条固定命令（前/后/侧/偏航），32 环境 300 步\n输出 RMSE、摔倒率、存活、机身高度、动作 rms/max、TorchScript 对拍误差"];
-    e2 [label="agents/supermimic/single/export.py\nexport_policy：policy_N.pt（TorchScript，B×225→B×12）\npolicy_N.onnx（动态 batch）+ policy_N.json 元数据"];
+    e2 [label="rl/deployment.py export_checkpoint\n由 tools/export_supermimic_policy.py 显式调用：\npolicy_N.pt（TorchScript，B×225→B×12）\npolicy_N.onnx（动态 batch）+ policy_N.json 元数据"];
   }
 
   t5 -> e1 [style=dashed, label="读 model_N.pt"];
-  t5 -> e2 [label="保存时自动导出"];
+  t5 -> e2 [style=dashed, label="需要部署时按检查点导出"];
   e2 -> p2 [style=dotted, label="部署物"];
   p1 -> e1 [style=dotted, label="同样的快照校验"];
 }

@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：提供混合专家历史策略、价值网络和物理动力学网络。"""
+"""内容：提供混合专家历史策略和价值网络。"""
 
 from __future__ import annotations
 
@@ -7,41 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from ..interfaces import TaskState
-
-
-class RunningNorm(nn.Module):
-    """按参考实现合并总体方差；前向固定统计，不隐式更新。"""
-
-    def __init__(self, width: int):
-        super().__init__()
-        self.register_buffer("mean", torch.zeros(width))
-        self.register_buffer("var", torch.ones(width))
-        self.register_buffer("count", torch.tensor(1e-4))
-
-    @torch.no_grad()
-    def update(self, values: Tensor):
-        values = values.reshape(-1, self.mean.numel())
-        if values.shape[0] == 0:
-            return
-        if not torch.isfinite(values).all():
-            raise FloatingPointError("Normalization data contains non-finite values")
-        variance, mean = torch.var_mean(values, dim=0, correction=0)
-        count = values.shape[0]
-        total = self.count + count
-        difference = mean - self.mean
-        self.var.copy_((self.var * self.count + variance * count + difference.square() * self.count * count / total) / total)
-        self.mean.add_(difference * count / total)
-        self.count.copy_(total)
-
-    def forward(self, values: Tensor) -> Tensor:
-        return ((values - self.mean) / (self.var.sqrt() + 1e-6)).clamp(-10.0, 10.0)
-
-    def unnormalize(self, values: Tensor) -> Tensor:
-        return values * (self.var.sqrt() + 1e-6) + self.mean
-
-
-# ---------- 混合专家编码器 ----------
+from .world_model import RunningNorm
 
 
 class Mlp(nn.Module):
@@ -164,13 +130,6 @@ class MoeActor(nn.Module):
         latent, _ = self.encoder(self.normalizer(flattened))
         return self.actor(torch.cat((latent, self.frame_normalizer(flattened[:, -self.observation_dim:])), -1))
 
-    def load_balance_loss(self, history: Tensor) -> tuple[Tensor, Tensor]:
-        """门控使用率偏离均匀分布的平方误差，并返回最大使用率便于监控塌缩。"""
-        _, weights = self.encoder(self.normalizer(self.flatten_history(history)))
-        usage = weights.mean(dim=0)
-        target = torch.full_like(usage, 1.0 / weights.shape[1])
-        return (usage - target).square().mean(), usage.max()
-
     @torch.no_grad()
     def load_pretrained(self, state_dict):
         """按 go2_rl_gym 导出名的展平命名载入专家与动作网络，保留本地归一化统计。
@@ -225,48 +184,3 @@ class Critic(nn.Module):
 
     def forward(self, features: Tensor) -> Tensor:
         return self.net(self.normalizer(features)).squeeze(-1)
-
-
-class WorldModel(nn.Module):
-    """任务决定残差坐标；网络只学习记录物理转移，不学习奖励或失败头。"""
-
-    def __init__(self, task, hidden):
-        super().__init__()
-        self.task = task
-        self.spec = task.spec
-        layers, width = [], task.model_input_dim
-        for hidden_width in hidden:
-            layers.extend((nn.Linear(width, hidden_width), nn.SiLU()))
-            width = hidden_width
-        layers.append(nn.Linear(width, task.spec.delta_dim))
-        self.net = nn.Sequential(*layers)
-        self.input_norm = RunningNorm(task.model_input_dim)
-        self.output_norm = RunningNorm(task.spec.delta_dim)
-
-    @torch.no_grad()
-    def update_stats(self, state: TaskState, action: Tensor, target: TaskState):
-        self.input_norm.update(self.task.model_input(state, action))
-        self.output_norm.update(self.task.model_target(state, target))
-
-    def forward(self, state: TaskState, action: Tensor, recorded_current: TaskState | None = None) -> TaskState:
-        inputs = (self.task.model_input(state, action) if recorded_current is None
-                  else self.task.supervised_model_input(state, action, recorded_current))
-        delta = self.output_norm.unnormalize(self.net(self.input_norm(inputs)))
-        physical = self.task.integrate(state, action, delta)
-        return self.task.advance(state, action, physical)
-
-    def loss(self, window) -> Tensor:
-        current = window.initial
-        recorded_current = window.initial
-        scale = self.output_norm.var.sqrt() + 1e-6
-        total = current.physical.new_zeros(())
-        for step in range(window.actions.shape[1]):
-            target = window.targets.index((slice(None), step))
-            action = window.actions[:, step]
-            predicted = self(current, action, recorded_current)
-            error = self.task.model_error(current, predicted, target, recorded_current) / scale
-            total = total + (error.square().mean(-1) * window.valid[:, step]).sum()
-            # 本协议的记忆只含记录动作与外生计时，按日志恢复命令重采样；物理状态始终回喂预测。
-            current = TaskState(predicted.physical, target.memory, target.command, target.context)
-            recorded_current = target
-        return total / window.valid.sum().clamp_min(1)

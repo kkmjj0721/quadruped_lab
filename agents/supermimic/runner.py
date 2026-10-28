@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：执行真实采集、世界模型拟合、单策略更新、回放归档及参数续训。"""
+"""内容：执行真实采集、世界模型拟合、策略更新、回放归档及参数续训。"""
 
 from __future__ import annotations
 
@@ -14,12 +14,13 @@ import time
 
 import torch
 
-from ..interfaces import append_history
-from ..logging import TrainingLogger
-from .config import SingleConfig, SingleExecutionConfig
+from .interfaces import append_history
+from .logging import TrainingLogger
+from .buffer import Replay, Window, WindowArchive
+from .config import ExecutionConfig, SuperMimicConfig
 from .learner import Learner
-from .models import Critic, WorldModel, make_actor
-from .replay import Replay, Window, WindowArchive
+from .policy import Critic, make_actor
+from .world_model import WorldModel
 
 
 def _numbers(metrics):
@@ -41,25 +42,21 @@ def _cpu_tree(value):
     return deepcopy(value)
 
 
-class SingleRunner:
-    """参数续训重建真实回放，不恢复仿真状态、不重置累计迭代，也不重排预热。
+class SuperMimicRunner:
+    """参考采集与优化循环；恢复区分重新计时的热启动与保留迭代号的继续训练。"""
 
-    策略更新起点由绝对 ``policy_start`` 与 ``actor_frozen_until`` 决定，与参考实现一致，
-    因此续训不会因重新预热而推迟策略更新。
-    """
-
-    def __init__(self, env, config: SingleConfig, log_dir=None, control_enabled=True, execution=None):
+    def __init__(self, env, config: SuperMimicConfig, log_dir=None, control_enabled=True, execution=None):
         self.env, self.task, self.spec = env, env.task, env.task.spec
         self.device = torch.device(env.device)
-        self.config = SingleConfig(**asdict(config))
-        self.execution = SingleExecutionConfig(**asdict(execution)) if execution is not None else SingleExecutionConfig()
+        self.config = SuperMimicConfig(**asdict(config))
+        self.execution = ExecutionConfig(**asdict(execution)) if execution is not None else ExecutionConfig()
         cfg = self.config
         if not math.isfinite(self.task.dt) or self.task.dt <= 0:
             raise ValueError("Task control timestep must be finite and positive")
         if cfg.explore_frac and cfg.explore_theta * self.task.dt >= 2:
             raise ValueError("OU exploration requires explore_theta * control_dt < 2")
-        if cfg.replay_capacity < self.spec.history_length + cfg.wm_window - 1:
-            raise ValueError("Replay capacity cannot fit the model window and observation history")
+        if cfg.replay_capacity <= cfg.wm_window + 1:
+            raise ValueError("Replay capacity must exceed the world-model window by at least two")
         self.actor = make_actor(self.spec, cfg, self.task.observation_term_dims).to(self.device)
         self.policy = self.actor
         self.model = WorldModel(self.task, cfg.wm_hidden).to(self.device)
@@ -70,7 +67,6 @@ class SingleRunner:
         self.control_enabled = bool(control_enabled)
         self.iteration = self.real_steps = self.imagined_steps = 0
         self.current = self.history = None
-        self.ages = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
         self.ou_noise = torch.zeros(env.num_envs, self.spec.action_dim, device=self.device)
         self.exploration_count = int(env.num_envs * cfg.explore_frac)
         self.driver = self.expert = self.steer = None
@@ -80,15 +76,16 @@ class SingleRunner:
         self.elapsed = 0.0
         self.session_iterations = 0
         self.episode_returns = torch.zeros(env.num_envs, device=self.device)
-        self.episode_lengths = torch.zeros_like(self.ages)
+        self.episode_lengths = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
         self.completed_episodes = deque(maxlen=100)
         self._safe_policy = None
         self._collapse_strikes = 0
         self._guard_falls = 0.0
-        self._guard_windows = 0
+        self._guard_reset_steps = 0
         if self.log_dir is not None:
-            (self.log_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2) + "\n", encoding="utf-8")
-            (self.log_dir / "execution.json").write_text(json.dumps(asdict(self.execution), indent=2) + "\n", encoding="utf-8")
+            # 运行来源只写入事件文件的TEXT面板，运行目录不再产生额外JSON快照。
+            self.logger.add_text("run/configuration", "```json\n" + json.dumps(
+                {"config": asdict(cfg), "execution": asdict(self.execution)}, indent=2) + "\n```")
 
     def configure_logging(self, *, target_iteration, log_interval=1):
         if target_iteration < self.iteration or log_interval < 1:
@@ -122,7 +119,6 @@ class SingleRunner:
         self.current = self.env.reset()
         frame = self.task.observe(self.current, noisy=True)
         self.history = frame[:, None].repeat(1, self.spec.history_length, 1)
-        self.ages.zero_()
         self.ou_noise.zero_()
         self.episode_returns.zero_()
         self.episode_lengths.zero_()
@@ -143,27 +139,31 @@ class SingleRunner:
         reward_sum = torch.zeros((), device=self.device)
         failure_count = torch.zeros((), device=self.device)
         timeout_count = torch.zeros((), device=self.device)
+        reset_steps = 0
         for _ in range(steps):
             observation = self.history[:, -1]
             action = self._override_actions(self.actor(self.history), self.history, observation)
+            # 参考先为全部环境推进OU，再生成全部独立噪声；未使用OU的行仍推进其随机过程。
+            decay = 1 - cfg.explore_theta * self.task.dt
+            sigma_ou = cfg.explore_noise * (2 * cfg.explore_theta) ** .5
+            self.ou_noise.mul_(decay).add_(sigma_ou * self.task.dt ** .5
+                                          * torch.randn_like(action))
             noise = cfg.action_noise * torch.randn_like(action)
-            if self.exploration_count:
-                count = self.exploration_count
-                decay = 1 - cfg.explore_theta * self.task.dt
-                self.ou_noise[:count].mul_(decay).add_(cfg.explore_noise * math.sqrt(2 * cfg.explore_theta * self.task.dt)
-                                                     * torch.randn_like(action[:count]))
-                noise[:count] = self.ou_noise[:count]
+            noise[:self.exploration_count] = self.ou_noise[:self.exploration_count]
             action = action + noise
             if not torch.isfinite(action).all():
                 raise FloatingPointError("Collected actions are non-finite")
             result = self.env.step(action)
             self.actor.update_statistics(self.history)
-            self.replay.add(self.current, observation, action, result, self.ages)
-            self.model.update_stats(self.current, action, result.final_state)
+            self.replay.add(self.current, self.history, action, result)
             done = result.terminated | result.truncated
+            keep = ~done
+            if keep.any():
+                self.model.update_stats(self.current.index(keep), action[keep], result.final_state.index(keep))
             self.episode_returns.add_(result.reward)
             self.episode_lengths.add_(1)
             if done.any():
+                reset_steps += 1
                 completed = torch.stack((self.episode_returns[done], self.episode_lengths[done].float()), dim=-1).cpu().tolist()
                 self.completed_episodes.extend(completed)
             self.episode_returns.masked_fill_(done, 0)
@@ -174,7 +174,6 @@ class SingleRunner:
             self.ou_noise.masked_fill_(done[:, None], 0)
             if self.driver is not None or self.expert is not None:
                 self._reset_drivers(done)
-            self.ages = torch.where(done, 0, self.ages + 1)
             self.current = result.next_state.detached_clone()
             reward_sum += result.reward.mean()
             failure_count += result.terminated.sum()
@@ -183,7 +182,8 @@ class SingleRunner:
                 totals[name] = totals.get(name, 0) + value
             self.real_steps += self.env.num_envs
         metrics = {name: value / steps for name, value in totals.items()}
-        metrics.update(real_reward=reward_sum / steps, failures=failure_count, timeouts=timeout_count)
+        metrics.update(real_reward=reward_sum / steps, failures=failure_count, timeouts=timeout_count,
+                       reset_steps=reset_steps)
         if self.completed_episodes:
             size = len(self.completed_episodes)
             metrics["episode/return_mean"] = sum(item[0] for item in self.completed_episodes) / size
@@ -204,16 +204,16 @@ class SingleRunner:
         archived = int(cfg.wm_batch * cfg.wm_archive_frac) if self.archive.size else 0
         uniform = cfg.wm_batch - prioritized - archived
         parts = [self.replay.sample_windows(uniform, cfg.wm_window)] if uniform else []
+        candidates = self.replay.sample_windows(4 * max(prioritized, 1), cfg.wm_window)
+        scores = self._priority(candidates)
+        worthy = self.task.archive_worthy(candidates)
+        if worthy.shape != scores.shape or worthy.dtype != torch.bool:
+            raise ValueError("Archive eligibility must be a boolean mask per window")
+        keep = worthy & (torch.rand_like(scores) < cfg.archive_keep_prob)
+        self.archive.add(candidates.index(keep))
+        chosen = (scores + 1e-3 * torch.rand_like(scores)).topk(prioritized).indices
         if prioritized:
-            candidates = self.replay.sample_windows(4 * prioritized, cfg.wm_window)
-            scores = self._priority(candidates)
-            chosen = (scores + 1e-3 * torch.rand_like(scores)).topk(prioritized).indices
             parts.append(candidates.index(chosen))
-            worthy = self.task.archive_worthy(candidates)
-            if worthy.shape != scores.shape or worthy.dtype != torch.bool:
-                raise ValueError("Archive eligibility must be a boolean mask per window")
-            keep = worthy & (torch.rand_like(scores) < cfg.archive_keep_prob)
-            self.archive.add(candidates.index(keep))
         if archived:
             parts.append(self.archive.sample(archived))
         return Window.concatenate(parts) if len(parts) > 1 else parts[0]
@@ -221,24 +221,22 @@ class SingleRunner:
     def _collapse_guard(self, metrics):
         """模型被利用表现为真实摔倒激增：回滚策略并降低学习率。
 
-        阈值与参考实现一致，使用一个记录窗口内每轮的平均绝对失败行数，
-        而不是按环境分钟归一化的比率。
+        MjLab只在发生reset的step输出Episode_Termination；因此分母是发生过reset
+        的step数（含纯超时step），不是窗口内所有step数，也不是环境分钟。
         """
         cfg = self.config
         self._guard_falls += metrics["failures"]
-        self._guard_windows += 1
+        self._guard_reset_steps += metrics["reset_steps"]
         if self.iteration % cfg.collapse_interval:
             return
-        falls = self._guard_falls / max(self._guard_windows, 1)
-        self._guard_falls, self._guard_windows = 0.0, 0
-        metrics["guard/falls_per_iteration"] = falls
-        eligible = (self._safe_policy is not None and self.iteration > self.learner.actor_frozen_until
-                    and self.learner.actor_updates > 0)
-        if not eligible or falls <= cfg.collapse_falls:
+        falls = self._guard_falls / max(self._guard_reset_steps, 1)
+        self._guard_falls, self._guard_reset_steps = 0.0, 0
+        metrics["guard/falls_per_reset_step"] = falls
+        if self.iteration <= self.learner.actor_frozen_until or falls <= cfg.collapse_falls:
             self._collapse_strikes = 0
             return
         self._collapse_strikes += 1
-        if self._collapse_strikes < 2:
+        if self._collapse_strikes < 2 or self._safe_policy is None:
             return
         for name in ("actor", "critic"):
             getattr(self, name).load_state_dict(self._safe_policy[name])
@@ -249,7 +247,7 @@ class SingleRunner:
         self.learner.ramp_start = self.iteration
         self._collapse_strikes = 0
         metrics["guard/rollback"] = 1.0
-        print(f"[WARN] Collapse guard: {falls:.1f} falls per iteration, "
+        print(f"[WARN] Collapse guard: {falls:.1f} falls per reset step, "
               f"restored saved actor and critic; lr scale {self.learner.lr_multiplier:.3g}", flush=True)
 
     def learn(self, iterations):
@@ -257,16 +255,26 @@ class SingleRunner:
             raise ValueError("Training iterations must be a positive integer")
         output = []
         target = max(self.target_iteration, self.iteration + iterations)
+        # 预填独立于训练迭代；默认8步窗口先收集10步，每轮再采collect_steps。
+        self._synchronize()
+        prefill_started = time.perf_counter()
+        while self.replay.size <= self.config.wm_window + 1:
+            metrics = self.collect(self.config.collect_steps)
+            self._guard_falls += float(metrics["failures"])
+            self._guard_reset_steps += metrics["reset_steps"]
+        self._synchronize()
+        self.elapsed += time.perf_counter() - prefill_started
         for _ in range(iterations):
+            # 来源在真实采集前设置当前迭代号，驱动衰减与学习率使用同一编号。
+            self.iteration += 1
             self._synchronize()
             started = time.perf_counter()
             previous_steps = self.real_steps
-            steps = self.config.initial_collection_steps if self.replay.size == 0 else self.config.collect_steps
-            metrics = self.collect(steps)
+            metrics = self.collect(self.config.collect_steps)
             self._synchronize()
             collection_time = time.perf_counter() - started
             model_time = control_time = 0.0
-            self.learner.schedule(self.iteration + 1)
+            self.learner.schedule(self.iteration)
             enabled = False
             if self.replay.ready(self.config.wm_window):
                 phase = time.perf_counter()
@@ -277,10 +285,10 @@ class SingleRunner:
                 metrics.update({key: value / self.config.wm_updates for key, value in model_metrics.items()})
                 self._synchronize()
                 model_time = time.perf_counter() - phase
-                if self.control_enabled and self.iteration + 1 > self.learner.policy_start:
+                if self.control_enabled and self.iteration > self.learner.policy_start:
                     enabled = True
                     phase = time.perf_counter()
-                    frozen = self.iteration + 1 <= self.learner.actor_frozen_until
+                    frozen = self.iteration <= self.learner.actor_frozen_until
                     metrics.update(self.learner.improve(self.replay.sample_seeds(self.config.imag_batch),
                                                        freeze_actor=frozen))
                     metrics["control/actor_frozen"] = float(frozen)
@@ -289,14 +297,14 @@ class SingleRunner:
                     control_time = time.perf_counter() - phase
             else:
                 metrics["model_not_ready"] = 1.0
-            self.iteration += 1
             elapsed = time.perf_counter() - started
             self.elapsed += elapsed
             self.session_iterations += 1
             delta = self.real_steps - previous_steps
             metrics.update(iteration=self.iteration, training_target_iteration=target, real_steps=self.real_steps,
                            real_steps_delta=delta, control_enabled=float(enabled), imagined_steps_total=self.imagined_steps,
-                           world_model_updates_total=self.learner.model_updates, control_updates_total=self.learner.actor_updates)
+                           world_model_updates_total=self.learner.model_updates, control_updates_total=self.learner.actor_updates,
+                           nonfinite_steps=self.learner.nonfinite_steps)
             metrics.update({"timing/collection_seconds": collection_time, "timing/world_model_seconds": model_time,
                             "timing/control_seconds": control_time, "timing/iteration_seconds": elapsed,
                             "timing/session_elapsed_seconds": self.elapsed,
@@ -313,6 +321,10 @@ class SingleRunner:
     def _remember_safe_policy(self):
         self._safe_policy = {name: _cpu_tree(getattr(self, name).state_dict()) for name in ("actor", "critic")}
 
+    def close(self):
+        """关闭事件文件写入器；环境由调用方负责释放。"""
+        self.logger.close()
+
     def save(self, path):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -328,14 +340,16 @@ class SingleRunner:
         if self._collapse_strikes == 0:
             self._remember_safe_policy()
 
-    def load(self, path):
+    def load(self, path, *, continue_run=False, reset_critic=False):
+        """按参考热启动网络和同形状优化器；继续训练仅追加恢复累计日志计数。
+
+        预热、回滚缩放、随机数及真实回放不从检查点恢复；策略形状不兼容时明确拒绝。
+        网络结构变化时保留当前任务定义，重建相应网络并应用参考重预热排期。
+        """
         data = torch.load(path, map_location=self.device, weights_only=False)
-        if data.get("format") != self.spec.model_id or data.get("spec_hash") != self.spec.hash:
-            raise ValueError("Single-actor checkpoint format or task specification mismatch")
-        if data.get("spec") != asdict(self.spec) or data.get("config") != asdict(self.config):
-            raise ValueError("Single-actor checkpoint configuration mismatch")
-        if data.get("control_enabled") != self.control_enabled:
-            raise ValueError("Cannot change control update mode while resuming")
+        if data.get("format") != self.spec.model_id:
+            raise ValueError("SuperMimic checkpoint format or task specification mismatch")
+        same = {}
         for name, checkpoint_key in (("actor", "actor"), ("critic", "critic"), ("model", "world_model")):
             state = data[checkpoint_key]
             if any(not torch.isfinite(value).all() for value in state.values()):
@@ -344,10 +358,35 @@ class SingleRunner:
                 raise ValueError("Checkpoint contains invalid normalization variance")
             if any((value <= 0).any() for key, value in state.items() if key.endswith(".count")):
                 raise ValueError("Checkpoint contains invalid normalization count")
-            getattr(self, name).load_state_dict(state)
-        self.learner.load_state_dict(data["learner"])
+            current = getattr(self, name).state_dict()
+            same[name] = set(current) == set(state) and all(current[key].shape == state[key].shape for key in current)
+        if not same["actor"]:
+            raise ValueError("Actor shape changed: no warm start is defined for this observation or architecture")
+        self.actor.load_state_dict(data["actor"])
+        if same["model"]:
+            self.model.load_state_dict(data["world_model"])
+        same["critic"] = same["critic"] and not reset_critic
+        if same["critic"]:
+            self.critic.load_state_dict(data["critic"])
+        self.learner = Learner(self.task, self.actor, self.model, self.critic, self.config, execution=self.execution)
+        saved_learner = data.get("learner", {})
+        for name in ("actor", "model", "critic"):
+            if same[name] and name in saved_learner:
+                getattr(self.learner, name + "_optimizer").load_state_dict(saved_learner[name])
+            # 该累计计数仅用于本项目日志，不影响来源的学习率和预热排期。
+            if continue_run and same[name]:
+                setattr(self.learner, name + "_updates", saved_learner.get(name + "_updates", 0))
+        if not same["model"]:
+            self.learner.policy_start = max(self.learner.policy_start, self.config.wm_rewarmup_iterations)
+            self.learner.actor_frozen_until = self.learner.policy_start + self.config.critic_warmup_iterations
+            print(f"World model re-initialised (shape changed); policy updates from iteration "
+                  f"{self.learner.policy_start}", flush=True)
+        if not same["critic"]:
+            self.learner.actor_frozen_until = max(self.learner.actor_frozen_until,
+                                                 self.learner.policy_start + self.config.critic_warmup_iterations)
+            print(f"Critic re-initialised; actor frozen until iteration {self.learner.actor_frozen_until}", flush=True)
         for name in ("iteration", "real_steps", "imagined_steps"):
-            value = data[name]
+            value = data.get(name, 0) if continue_run else 0
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError("Invalid checkpoint training counters")
             setattr(self, name, value)
@@ -357,9 +396,9 @@ class SingleRunner:
         self.elapsed = 0.0
         self.session_iterations = 0
         self._collapse_strikes = 0
-        self._guard_falls, self._guard_windows = 0.0, 0
-        torch.set_rng_state(data["rng"].cpu())
-        if self.device.type == "cuda" and data["cuda_rng"] is not None:
-            torch.cuda.set_rng_state_all([value.cpu() for value in data["cuda_rng"]])
-        self._remember_safe_policy()
+        self._guard_falls, self._guard_reset_steps = 0.0, 0
+        self._safe_policy = None
+        print(f"Resumed from {path} (iteration {data.get('iteration')})", flush=True)
+        if continue_run:
+            print(f"Continuing at iteration {self.iteration}", flush=True)
         return data

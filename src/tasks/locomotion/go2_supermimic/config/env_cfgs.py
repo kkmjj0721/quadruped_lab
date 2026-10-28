@@ -20,7 +20,6 @@ def resolve_go2_supermimic_cfg(
     if play:
         cfg.noise.add_noise = False
         cfg.terrain.curriculum = False
-        cfg.domain_randomization.enabled = False
     validate_config(cfg)
     return cfg
 

@@ -1,8 +1,8 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    装配固定家族／等级的连通地形，并从编译几何建立可微静态表面查询。
-    高度场使用三角插值；台阶边界为真实离散边界，不承诺边界处的光滑导数。
+    装配指定参考地形，从碰撞几何生成0.02米栅格并执行可微双线性查询。
+    初始化几何查询使用MuJoCo高度场三角表面；运行时与来源一样在栅格域外夹取。
 """
 
 from __future__ import annotations
@@ -11,176 +11,80 @@ import hashlib
 import json
 import math
 from copy import deepcopy
-from dataclasses import dataclass
 
 import mujoco
 import numpy as np
 import torch
-from mjlab.terrains import (
-    BoxFlatTerrainCfg, BoxInvertedPyramidStairsTerrainCfg, BoxPyramidStairsTerrainCfg,
-    HfPyramidSlopedTerrainCfg, HfRandomUniformTerrainCfg, TerrainEntityCfg, TerrainGeneratorCfg,
-)
-from mjlab.terrains.terrain_generator import SubTerrainCfg
+from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 
 
-def _stable_seed(seed: int, key: str) -> int:
-    """仅依据语义地址生成种子，不受Python进程随机hash影响。"""
-    return int.from_bytes(hashlib.sha256(f"{seed}/{key}".encode()).digest()[:8], "little")
+def reference_generator(cfg):
+    """逐项复现go2-supermimic env/terrains.py的ROUGH_TERRAINS。"""
+    from mjlab.terrains.config import (
+        flat, pyramid_stairs, pyramid_stairs_inv, box_random_grid, random_rough,
+        hf_pyramid_slope, hf_pyramid_slope_inv,
+    )
+    return TerrainGeneratorCfg(
+        seed=cfg.seed, size=tuple(cfg.patch_size_m), border_width=cfg.outer_flat_width_m,
+        num_rows=cfg.core_rows, num_cols=cfg.num_cols, curriculum=True, color_scheme="none",
+        sub_terrains={
+            "flat": flat(proportion=0.10),
+            "stairs": pyramid_stairs(proportion=0.20, step_height_range=(0.02, 0.10), step_width=0.4, platform_width=1.5),
+            "stairs_inv": pyramid_stairs_inv(proportion=0.20, step_height_range=(0.02, 0.10), step_width=0.4, platform_width=1.5),
+            "boxes": box_random_grid(proportion=0.15, grid_width=0.45, grid_height_range=(0.02, 0.05), platform_width=1.0),
+            "rough": random_rough(proportion=0.15, noise_range=(0.01, 0.04), noise_step=0.01),
+            "slope": hf_pyramid_slope(proportion=0.10, slope_range=(0.0, 0.3)),
+            "slope_inv": hf_pyramid_slope_inv(proportion=0.10, slope_range=(0.0, 0.3)),
+        }, add_lights=False,
+    )
 
 
-def _make_patch(family, parameters, size):
-    params = dict(parameters)
-    if family == "random_rough":
-        amplitude = params.pop("height_max_m")
-        return HfRandomUniformTerrainCfg(size=size, noise_range=(0.0, amplitude),
-                                        scale_with_difficulty=False, **params)
-    if family.startswith("stairs_"):
-        height = params.pop("step_height_m")
-        terrain_type = BoxInvertedPyramidStairsTerrainCfg if family.endswith("_up") else BoxPyramidStairsTerrainCfg
-        return terrain_type(size=size, step_height_range=(height, height), **params)
-    if family.startswith("slope_"):
-        gradient = params.pop("gradient")
-        if gradient == 0:
-            return BoxFlatTerrainCfg(size=size)
-        return HfPyramidSlopedTerrainCfg(size=size, slope_range=(gradient, gradient),
-                                       inverted=family.endswith("_up"), **params)
-    raise ValueError(f"Unsupported terrain family: {family}")
-
-
-@dataclass(kw_only=True)
-class ConnectedColumnCfg(SubTerrainCfg):
-    """difficulty只选择物理行，几何参数自身已固定等级。"""
-
-    tiles: tuple = ()
-    seed: int = 0
-    column: int = 0
-
-    def function(self, difficulty, spec, rng):
-        del rng
-        row = round(difficulty * max(len(self.tiles) - 1, 1))
-        if not 0 <= row < len(self.tiles) or not math.isclose(difficulty, row / max(len(self.tiles) - 1, 1), abs_tol=1e-7):
-            raise ValueError("Invalid connected terrain row address")
-        family, level, parameters = self.tiles[row]
-        generator = np.random.default_rng(_stable_seed(self.seed, f"tile/{row}/{self.column}/{family}/{level}"))
-        output = _make_patch(family, parameters, self.size).function(0.0, spec, generator)
-        # 出生点须位于实际中心表面，不能沿用粗糙高度场的局部最大高度。
-        for geometry in output.geometries:
-            if geometry.hfield is None:
-                continue
-            heightfield = geometry.hfield
-            data = np.asarray(heightfield.userdata).reshape(heightfield.nrow, heightfield.ncol)
-            y, x = (heightfield.nrow - 1) / 2, (heightfield.ncol - 1) / 2
-            r, c = int(y), int(x)
-            r1, c1 = min(r + 1, heightfield.nrow - 1), min(c + 1, heightfield.ncol - 1)
-            fy, fx = y - r, x - c
-            z00, z01, z10, z11 = data[r, c], data[r, c1], data[r1, c], data[r1, c1]
-            value = (z00 + fx * (z01 - z00) + fy * (z11 - z01) if fx >= fy else
-                     z00 + fx * (z11 - z10) + fy * (z10 - z00))
-            output.origin[2] = geometry.geom.pos[2] + heightfield.size[2] * value
-        return output
+def clean_look(terrain):
+    """保留参考地面的材质、背景与补光。"""
+    from mjlab.utils.spec_config import LightCfg, MaterialCfg, TextureCfg
+    terrain.textures = (
+        TextureCfg(name="sky", type="skybox", builtin="gradient", rgb1=(.93,.95,.98), rgb2=(.62,.74,.87), width=512, height=3072),
+        TextureCfg(name="grid", type="2d", builtin="checker", mark="edge", rgb1=(.66,.66,.65), rgb2=(.62,.62,.61),
+                   markrgb=(.46,.47,.50), width=512, height=512),
+    )
+    terrain.materials = (MaterialCfg(name="ground", texture="grid", texuniform=True, texrepeat=(1.,1.), reflectance=0., geom_names_expr=(".*",)),)
+    terrain.lights = (LightCfg(name="fill", type="directional", pos=(0.,0.,10.), dir=(.3,.2,-1.), diffuse=(.12,.12,.12),
+                              specular=(0.,0.,0.), ambient=(.12,.13,.15), castshadow=False),)
+    return terrain
 
 
 class TerrainMap:
-    """课程以家族逻辑等级索引核心区，不把外扩行或重复最高行当成新等级。"""
+    """参考的七种地形各占一列，五行按生成器difficulty递增。"""
 
     def __init__(self, cfg):
         self.cfg = deepcopy(cfg)
         self.plane = cfg.mode == "flat"
-        if cfg.mode not in ("flat", "rough"):
-            raise ValueError("Terrain mode must be flat or rough")
-        self.size = tuple(float(value) for value in cfg.patch_size_m)
-        if len(self.size) != 2 or any(not math.isfinite(value) or value <= 0 for value in self.size):
-            raise ValueError("Terrain patch dimensions must be finite and positive")
-        self.family_names = ("flat",) if self.plane else tuple(cfg.levels)
-        self.level_counts = (1,) if self.plane else tuple(len(cfg.levels[family]) for family in self.family_names)
-        self.rings = self.row_offset = 0 if self.plane else cfg.surrounding_rings
-        self.rows = 1 if self.plane else cfg.core_rows + 2 * self.rings
-        self.cols = 1 if self.plane else len(self.family_names) + 2 * self.rings
-        if self.rings < 0 or any(count <= 0 for count in self.level_counts) or (not self.plane and cfg.core_rows < max(self.level_counts)):
-            raise ValueError("Terrain rows cannot omit configured family levels")
+        self.size = tuple(cfg.patch_size_m)
+        self.generator = None if self.plane else reference_generator(cfg)
+        self.family_names = ("flat",) if self.plane else tuple(self.generator.sub_terrains)
+        self.proportions = (1.,) if self.plane else tuple(term.proportion for term in self.generator.sub_terrains.values())
+        self.rows, self.cols = (1, 1) if self.plane else (cfg.core_rows, cfg.num_cols)
+        self.level_counts = (self.rows,) * self.cols
+        self.row_offset = self.rings = 0
         self.support_half_extent = np.asarray((self.rows, self.cols)) * self.size / 2 + cfg.outer_flat_width_m
-        if not math.isfinite(cfg.outer_flat_width_m) or cfg.outer_flat_width_m < 0:
-            raise ValueError("Outer flat width must be finite and nonnegative")
         self.origins = None
-        self.tiles = []
-        if not self.plane:
-            for row in range(self.rows):
-                for col in range(self.cols):
-                    family = self.family_names[(col - self.rings) % len(self.family_names)]
-                    names = tuple(cfg.levels[family])
-                    level = names[min(max(row - self.rings, 0), len(names) - 1)]
-                    category = "stairs" if family.startswith("stairs_") else "slope" if family.startswith("slope_") else family
-                    if category not in cfg.defaults:
-                        raise ValueError(f"Missing terrain defaults for {family}")
-                    parameters = {**deepcopy(cfg.defaults[category]), **deepcopy(cfg.levels[family][level])}
-                    self._validate_parameters(family, parameters)
-                    self.tiles.append({"row": row, "col": col, "family": family, "level": level, "parameters": parameters})
-
-    def _validate_parameters(self, family, parameters):
-        for name, value in parameters.items():
-            if value is None or isinstance(value, bool):
-                continue
-            if not isinstance(value, (float, int)) or not math.isfinite(value) or value < 0:
-                raise ValueError(f"Invalid terrain parameter {family}/{name}")
-            if value == 0 and name not in ("border_width", "gradient"):
-                raise ValueError(f"Terrain parameter must be positive: {family}/{name}")
-        if 2 * parameters.get("border_width", 0) + parameters.get("platform_width", 0) >= min(self.size):
-            raise ValueError("Terrain platform and border do not fit the patch")
-        if "horizontal_scale" in parameters:
-            horizontal = parameters["horizontal_scale"]
-            border = parameters["border_width"]
-            downsample = parameters.get("downsampled_scale") or horizontal
-            if (border and border < horizontal) or downsample < horizontal or min(self.size) - 2 * border < 4 * downsample:
-                raise ValueError("Invalid heightfield sampling scales")
-        if family == "random_rough" and parameters["noise_step"] < parameters["vertical_scale"]:
-            raise ValueError("Noise step must cover a vertical quantization unit")
 
     def entity_cfg(self):
         if self.plane:
-            return TerrainEntityCfg(terrain_type="plane")
-        columns = {
-            f"connected_column_{col}": ConnectedColumnCfg(
-                size=self.size, seed=self.cfg.seed, column=col,
-                tiles=tuple((tile["family"], tile["level"], tile["parameters"])
-                            for tile in self.tiles if tile["col"] == col))
-            for col in range(self.cols)
-        }
-        return TerrainEntityCfg(
-            terrain_type="generator", max_init_terrain_level=self.rows - 1,
-            terrain_generator=TerrainGeneratorCfg(
-                seed=self.cfg.seed, curriculum=True, size=self.size, num_rows=self.rows, num_cols=self.cols,
-                difficulty_range=(0.0, 1.0), border_width=self.cfg.outer_flat_width_m, border_height=1.0,
-                sub_terrains=columns))
+            return clean_look(TerrainEntityCfg(terrain_type="plane"))
+        return clean_look(TerrainEntityCfg(terrain_type="generator", terrain_generator=deepcopy(self.generator), max_init_terrain_level=None))
 
     def bind(self, origins):
         if self.plane:
-            if origins is not None:
-                raise ValueError("Plane terrain must use per-environment grid origins")
             return
         if origins is None or tuple(origins.shape) != (self.rows, self.cols, 3) or not torch.isfinite(origins).all():
-            raise ValueError("Compiled terrain origins do not match the connected map")
-        expected = origins.new_tensor([[(row + 0.5 - self.rows / 2) * self.size[0],
-                                       (col + 0.5 - self.cols / 2) * self.size[1]]
-                                      for row in range(self.rows) for col in range(self.cols)])
-        if not torch.allclose(origins[..., :2].reshape(-1, 2), expected, atol=1e-5):
-            raise ValueError("Compiled terrain centres do not match the connected map")
+            raise ValueError("Compiled terrain origins differ from the reference map")
         self.origins = origins.detach().clone()
 
     def spawn_origins(self, family_ids, levels):
         if self.plane:
-            raise ValueError("Plane origins must be allocated by the environment")
-        if self.origins is None:
-            raise RuntimeError("Bind compiled terrain origins before sampling spawns")
-        if family_ids.dtype != torch.long or levels.dtype != torch.long or family_ids.shape != levels.shape:
-            raise ValueError("Terrain family and level indices must be matching int64 tensors")
-        if family_ids.device != self.origins.device or levels.device != self.origins.device:
-            raise ValueError("Terrain indices and origins must share a device")
-        if ((family_ids < 0) | (family_ids >= len(self.family_names))).any():
-            raise ValueError("Terrain family index out of range")
-        counts = levels.new_tensor(self.level_counts)[family_ids]
-        if ((levels < 0) | (levels >= counts)).any():
-            raise ValueError("Terrain logical level out of range")
-        return self.origins[levels + self.rings, family_ids + self.rings].clone()
+            raise ValueError("Plane origins are allocated by the environment")
+        return self.origins[levels, family_ids].clone()
 
 
 class PlaneSurface:
@@ -208,7 +112,7 @@ class PlaneSurface:
         return xy.sum(-1) * 0 + self.elevation
 
 
-class TerrainSurface:
+class TerrainGeometry:
     """按地块选择静态碰撞表面；查询热路径只使用Torch。"""
 
     QUERY_CHUNK_SIZE = 8192
@@ -280,7 +184,7 @@ class TerrainSurface:
                 raise ValueError(f"Unsupported terrain collision geometry: {kind}")
         self.geometry_hash = digest.hexdigest()
         max_boxes = max(max(map(len, boxes)), 1)
-        box_data = np.zeros((bucket_count, max_boxes, 5), dtype=np.float32)
+        box_data = np.zeros((bucket_count, max_boxes, 5), dtype=np.float64)
         box_data[..., 2:4] = -1
         box_data[..., 4] = -np.inf
         for bucket, values in enumerate(boxes):
@@ -288,8 +192,8 @@ class TerrainSurface:
                 box_data[bucket, :len(values)] = values
         self.boxes = torch.from_numpy(box_data).to(device)
         max_samples = max([entry[2] * entry[3] for entry in fields if entry is not None] + [4])
-        field_values = np.zeros((bucket_count, max_samples), dtype=np.float32)
-        field_info = np.zeros((bucket_count, 7), dtype=np.float32)
+        field_values = np.zeros((bucket_count, max_samples), dtype=np.float64)
+        field_info = np.zeros((bucket_count, 7), dtype=np.float64)
         field_info[:, 2:4] = 1
         field_rows = np.full((bucket_count, 2), 2, dtype=np.int64)
         field_present = np.zeros(bucket_count, dtype=bool)
@@ -311,6 +215,46 @@ class TerrainSurface:
         if margin < 0 or not math.isfinite(margin):
             raise ValueError("Terrain query margin must be finite and nonnegative")
         return torch.isfinite(xy).all(-1) & (xy.abs() <= self.half_support - margin).all(-1)
+
+    def rasterize(self, xs, ys):
+        """按轴对齐碰撞几何填充来源射线栅格，不逐点广播全部箱体。"""
+        heights = torch.full((ys.numel(), xs.numel()), -torch.inf, dtype=torch.float64)
+        # 同一箱体可同时登记在相邻地块，仅在初始化去重一次。
+        boxes = torch.unique(self.boxes.reshape(-1, 5), dim=0)
+        boxes = boxes[boxes[:, 2] >= 0]
+        for box in boxes:
+            cx, cy, hx, hy, top = box.tolist()
+            x0 = int(torch.searchsorted(xs, torch.tensor(cx - hx, dtype=xs.dtype)))
+            x1 = int(torch.searchsorted(xs, torch.tensor(cx + hx, dtype=xs.dtype), right=True))
+            y0 = int(torch.searchsorted(ys, torch.tensor(cy - hy, dtype=ys.dtype)))
+            y1 = int(torch.searchsorted(ys, torch.tensor(cy + hy, dtype=ys.dtype), right=True))
+            region = heights[y0:y1, x0:x1]
+            region.copy_(torch.maximum(region, region.new_tensor(top)))
+        for bucket in self.field_present.nonzero().flatten().tolist():
+            info = self.field_info[bucket]
+            x0, y0 = (int(torch.searchsorted(axis, info[dim] - info[dim + 2])) for dim, axis in enumerate((xs, ys)))
+            x1, y1 = (int(torch.searchsorted(axis, info[dim] + info[dim + 2], right=True)) for dim, axis in enumerate((xs, ys)))
+            gx, gy = torch.meshgrid(xs[x0:x1], ys[y0:y1], indexing="xy")
+            points = torch.stack((gx.flatten(), gy.flatten()), -1)
+            # 此处查询同样使用三角插值，对应MuJoCo高度场碰撞的表面。
+            values = torch.cat([self._field_heights(chunk, bucket) for chunk in points.split(65536)])
+            region = heights[y0:y1, x0:x1]
+            region.copy_(torch.maximum(region, values.reshape(region.shape)))
+        return torch.where(torch.isfinite(heights), heights, 0).float()
+
+    def _field_heights(self, points, bucket):
+        info, sizes = self.field_info[bucket], self.field_shapes[bucket]
+        uv = ((points - info[:2] + info[2:4]) / (2 * info[2:4])).clamp(0, 1)
+        coordinate = uv * (sizes.flip(-1) - 1)
+        index = torch.minimum(coordinate.floor().long(), sizes.flip(-1) - 2)
+        fx, fy = (coordinate - index).unbind(-1)
+        c, r = index.unbind(-1)
+        width = sizes[1]
+        z00, z01 = self.field_values[bucket, r * width + c], self.field_values[bucket, r * width + c + 1]
+        z10, z11 = self.field_values[bucket, (r + 1) * width + c], self.field_values[bucket, (r + 1) * width + c + 1]
+        value = torch.where(fx >= fy, z00 + fx * (z01 - z00) + fy * (z11 - z01),
+                            z00 + fx * (z11 - z10) + fy * (z10 - z00))
+        return info[4] + info[5] * value
 
     def height(self, xy):
         if xy.shape[-1] != 2 or xy.device != self.device:
@@ -338,7 +282,7 @@ class TerrainSurface:
         in_grid = ((cell >= 0) & (cell < cell.new_tensor((self.rows, self.cols)))).all(-1)
         bucket = torch.where(in_grid, cell[:, 0] * self.cols + cell[:, 1], self.rows * self.cols)
         boxes = self.boxes[bucket]
-        box_inside = ((points[:, None, :] - boxes[..., :2]).abs() <= boxes[..., 2:4] + 1e-6).all(-1)
+        box_inside = ((points[:, None, :] - boxes[..., :2]).abs() <= boxes[..., 2:4]).all(-1)
         box_height = torch.where(box_inside, boxes[..., 4], -torch.inf).amax(-1)
         info = self.field_info[bucket]
         sizes = self.field_shapes[bucket]
@@ -360,3 +304,54 @@ class TerrainSurface:
                                    z00 + fx * (z11 - z10) + fy * (z10 - z00))
         field_height = torch.where(field_inside, info[:, 4] + info[:, 5] * interpolated, -torch.inf)
         return torch.maximum(box_height, field_height) + points.sum(-1) * 0
+
+
+class TerrainSurface:
+    """参考0.02米高度栅格：双线性插值及域外clamp，与来源采样同义。"""
+
+    @classmethod
+    def from_model(cls, model, device="cpu", terrain_map=None):
+        if terrain_map.plane:
+            return PlaneSurface(device)
+        self = cls()
+        self.device = torch.device(device)
+        cfg = terrain_map.cfg
+        origins = terrain_map.origins.reshape(-1, 3).cpu().numpy()
+        self.origin = (float(origins[:, 0].min() - cfg.field_half_m), float(origins[:, 1].min() - cfg.field_half_m))
+        upper = (float(origins[:, 0].max() + cfg.field_half_m), float(origins[:, 1].max() + cfg.field_half_m))
+        self.res = cfg.field_resolution_m
+        geometry = TerrainGeometry.from_model(model, terrain_map=terrain_map)
+        payload = f"reference_heightfield_v1/{geometry.geometry_hash}/{self.origin}/{upper}/{self.res}"
+        self.geometry_hash = hashlib.sha256(payload.encode()).hexdigest()
+        from pathlib import Path
+        path = Path(cfg.field_cache_dir) / f"heightfield_blind_{self.geometry_hash[:12]}.pt"
+        if path.exists():
+            self.h = torch.load(path, map_location=self.device, weights_only=True)["h"]
+            return self
+        xs = torch.from_numpy(np.arange(self.origin[0], upper[0] + 1e-9, self.res))
+        ys = torch.from_numpy(np.arange(self.origin[1], upper[1] + 1e-9, self.res))
+        heights = geometry.rasterize(xs, ys)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"h": heights, "origin": self.origin, "res": self.res}, path)
+        self.h = heights.to(self.device)
+        return self
+
+    def contains(self, xy, margin=0.0):
+        """来源高度图对所有有限坐标有效，域外取边缘值。"""
+        return torch.isfinite(xy).all(-1)
+
+    def height(self, xy):
+        if xy.shape[-1] != 2 or not torch.isfinite(xy).all():
+            raise ValueError("Terrain queries must contain finite XY coordinates")
+        return self.height_unchecked(xy)
+
+    def height_unchecked(self, xy):
+        gx = (xy[..., 0] - self.origin[0]) / self.res
+        gy = (xy[..., 1] - self.origin[1]) / self.res
+        height, width = self.h.shape
+        gx, gy = gx.clamp(0, width - 1.001), gy.clamp(0, height - 1.001)
+        x0, y0 = gx.floor().long(), gy.floor().long()
+        fx, fy = gx - x0, gy - y0
+        h00, h01 = self.h[y0, x0], self.h[y0, x0 + 1]
+        h10, h11 = self.h[y0 + 1, x0], self.h[y0 + 1, x0 + 1]
+        return (h00 * (1 - fx) + h01 * fx) * (1 - fy) + (h10 * (1 - fx) + h11 * fx) * fy

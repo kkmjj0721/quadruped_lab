@@ -12,13 +12,13 @@ from pathlib import Path
 
 import torch
 
-from agents.supermimic.single.models import MoeActor, make_actor
+from agents.supermimic.policy import MoeActor, make_actor
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
 from ..config.train_cfg import TASK_MODES
 from ..go_supermimic_env_cfg import validate_config
 from ..mdp.reference_task import Go2ReferenceTaskModel
-from .single_runner import algorithm_config
+from .runner import algorithm_config
 from ..config.loading import (
     apply_settings, read_settings, configuration_for_settings,
 )
@@ -88,7 +88,7 @@ def build_playback_policy(source: PlaybackSource, adapter) -> MoeActor:
         raise ValueError("Checkpoint task spec does not match the saved configuration and current robot")
     policy_config = algorithm_config(source.cfg)
     if checkpoint.get("config") != asdict(policy_config):
-        raise ValueError("Single-actor checkpoint configuration mismatch")
+        raise ValueError("SuperMimic checkpoint configuration mismatch")
     policy = make_actor(original_task.spec, policy_config,
                         observation_term_dims=original_task.observation_term_dims).to(adapter.device)
     weights = checkpoint["actor"]

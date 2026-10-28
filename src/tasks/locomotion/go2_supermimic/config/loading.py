@@ -74,7 +74,26 @@ def read_settings(path: Path) -> tuple[dict, bool]:
     settings = payload.get("config", payload)
     if not isinstance(settings, dict):
         raise ValueError("Task configuration snapshot must contain an object in config")
-    return settings, "config" in payload
+    return _migrate_sections(settings), "config" in payload
+
+
+def _migrate_sections(settings: dict) -> dict:
+    """把重构前的``single``算法段并回``algo``，使旧快照仍可续训与播放。
+
+    两段同时存在时属于手工合并的异常快照，以当前代码写出的``algo``为准，
+    旧段只作为缺省值，避免同一份快照被解释成两套预算。
+    """
+    if "single" not in settings:
+        return settings
+    migrated = deepcopy(settings)
+    legacy = migrated.pop("single")
+    if not isinstance(legacy, dict):
+        raise ValueError("Task configuration section single must be an object")
+    current = migrated.get("algo")
+    if current is not None and not isinstance(current, dict):
+        raise ValueError("Task configuration section algo must be an object")
+    migrated["algo"] = _merge_mapping(legacy, current or {})
+    return migrated
 
 
 def configuration_for_settings(settings: dict | None = None):

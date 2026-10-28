@@ -18,6 +18,7 @@ from ..mdp.curriculums import CommandCurriculum, TerrainCurriculum
 from ..mdp.state_spec import (
     ACTION_DIM, COMMAND_TIMER, CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION,
     CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY, JOINT_NAMES,
+    COMMAND_OVERRIDE,
 )
 from ..mdp.reference_task import Go2ReferenceTaskModel
 from ..mdp.reference_state import ANGULAR_BODY, CONTEXT_COM
@@ -68,6 +69,8 @@ class Go2TransitionAdapter:
             self.terrain_curriculum = TerrainCurriculum(
                 self.map, self.num_envs, self.cfg.terrain.max_init_level, enabled=self.cfg.terrain.curriculum,
                 episode_length_s=self.cfg.env.episode_length_s, device=self.device)
+            if not self.map.plane:
+                self.terrain_curriculum.family_ids.copy_(terrain.terrain_types)
             self.context_version = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
             self._state = None
             self._play_commands = None
@@ -93,6 +96,8 @@ class Go2TransitionAdapter:
             raise RuntimeError("Command overrides are available only during playback")
         if commands is None:
             self._play_commands = None
+            if self._state is not None:
+                self._state.memory[:, COMMAND_OVERRIDE] = 0
             return
         values = torch.as_tensor(commands, dtype=torch.float32, device=self.device)
         if values.shape == (3,):
@@ -102,6 +107,7 @@ class Go2TransitionAdapter:
         self._play_commands = values.clone()
         if self._state is not None:
             self._state.command.copy_(self._play_commands)
+            self._state.memory[:, COMMAND_OVERRIDE] = 1
 
     def planar_pose(self):
         """返回各环境机身世界坐标xy与航向，供外部驱动生成追逐命令。"""
@@ -119,6 +125,7 @@ class Go2TransitionAdapter:
             raise ValueError("Driver commands must be finite [num_envs,3]")
         if self._play_commands is None:
             self._state.command.copy_(values)
+            self._state.memory[:, COMMAND_OVERRIDE] = 1
 
     # ---------- 回合重置 ----------
 
@@ -126,6 +133,7 @@ class Go2TransitionAdapter:
         if self.cfg.terrain.mode == "flat":
             return
         terrain = self.raw_env.scene.terrain
+        self.terrain_curriculum.sample(ids)
         terrain.env_origins[ids] = self.terrain_curriculum.origins(ids)
         # 同步原生可视化元数据，课程计算仍只有当前adapter这一处。
         terrain.terrain_levels[ids] = self.terrain_curriculum.levels[ids] + self.map.row_offset
@@ -152,19 +160,15 @@ class Go2TransitionAdapter:
         self.raw_env.reset(env_ids=ids)
         physical = self.task.read_physical(self.raw_env)
         context = self._context(ids)
-        command, remaining = self.task.sample_commands(context)
+        reset_state = self.task.initialize_state(physical[ids].clone(), context)
         if self._play_commands is not None:
-            command = self._play_commands[ids].clone()
-        memory = torch.zeros((ids.numel(), self.task.spec.memory_dim), dtype=torch.float32, device=self.device)
-        memory[:, COMMAND_TIMER] = remaining
-        reset_state = TaskState(physical[ids].clone(), memory, command, context)
+            reset_state.command.copy_(self._play_commands[ids])
+            reset_state.memory[:, COMMAND_OVERRIDE] = 1
         if self._state is None:
             self._state = reset_state.detached_clone()
         else:
             for name in ("physical", "memory", "command", "context"):
                 getattr(self._state, name)[ids] = getattr(reset_state, name)
-        world_xy = self.robot.data.root_link_pos_w[:, :2]
-        self.terrain_curriculum.reset_episodes(ids, world_xy)
         self.context_version[ids] += 1
 
     @torch.no_grad()
@@ -194,7 +198,9 @@ class Go2TransitionAdapter:
         physical = self.task.read_physical(self.raw_env).clone()
         if not torch.isfinite(physical).all():
             raise FloatingPointError("Go2 physical state contains non-finite values")
-        final = self.task.advance(before, actions, physical).detached_clone()
+        sensor = self.raw_env.scene["feet_ground_contact"].data
+        final = self.task.advance(before, actions, physical,
+                                  contact_times=(sensor.current_air_time.clone(), sensor.current_contact_time.clone())).detached_clone()
         if self._play_commands is not None:
             final.command.copy_(self._play_commands)
         terminated = (torch.zeros(self.num_envs, dtype=torch.bool, device=self.device) if self.no_terminations
@@ -204,19 +210,14 @@ class Go2TransitionAdapter:
         reward = (self.step_dt * sum(getattr(self.cfg.reward.scales, name) * value
                                      for name, value in terms.items())).detach().clone()
         velocity = self.task.tracking_velocity(final)
-        yaw = self.task.yaw(before)
         linear_error = velocity[:, :2] - before.command[:, :2]
         angular_error = velocity[:, 2] - before.command[:, 2]
-        # 命令在航向坐标系；累计位移使用动作前航向，不把事后转向应用到历史命令。
-        vx, vy = before.command[:, 0], before.command[:, 1]
-        world_velocity = torch.stack((yaw.cos() * vx - yaw.sin() * vy, yaw.sin() * vx + yaw.cos() * vy), -1)
-        self.terrain_curriculum.observe(self.task.world_position(final)[:, :2], world_velocity, self.step_dt)
         if not self.play:
             self.command_curriculum.control_steps += 1
+            self.terrain_curriculum.control_steps = self.raw_env.common_step_counter
         self._state = final.detached_clone()
         done_ids = (terminated | truncated).nonzero().flatten()
         if done_ids.numel():
-            self.terrain_curriculum.complete(done_ids, before.command)
             self._reset_rows(done_ids)
         self.last_metrics = {f"reward/{name}": value.mean() for name, value in terms.items()}
         self.last_metrics.update(terrain_level=self.terrain_curriculum.levels.float().mean(),
@@ -238,6 +239,12 @@ class Go2TransitionAdapter:
         self.command_curriculum.load_state_dict(state["command"])
         self.terrain_curriculum.load_state_dict(state["terrain"])
         self.raw_env.common_step_counter = self.command_curriculum.control_steps
+
+    def resume_progress(self, iteration):
+        """参考continue_run仅恢复公共进度，不伪装成恢复各环境物理状态。"""
+        self.raw_env.common_step_counter = iteration
+        self.command_curriculum.control_steps = iteration
+        self.terrain_curriculum.control_steps = iteration
 
     def close(self):
         self.raw_env.close()
