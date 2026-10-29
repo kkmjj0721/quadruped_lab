@@ -28,7 +28,11 @@ def _make_env_cfg(play, go2_cfg, terrain_mode, terrain_map):
     cfg = resolve_go2_supermimic_cfg(go2_cfg, play=play, terrain_mode=terrain_mode)
     if terrain_map is not None and terrain_map.plane != (terrain_mode == "flat"):
         raise ValueError("Terrain map and environment configuration modes differ")
-    return make_go2_supermimic_env_cfg(cfg, terrain_map=terrain_map)
+    env_cfg = make_go2_supermimic_env_cfg(cfg, terrain_map=terrain_map)
+    if play:
+        # 播放持续运行，跌倒重置仍由adapter的任务终止判定负责。
+        del env_cfg.terminations["time_out"]
+    return env_cfg
 
 
 def unitree_go2_rough_env_cfg(

@@ -74,7 +74,27 @@ def read_settings(path: Path) -> tuple[dict, bool]:
     settings = payload.get("config", payload)
     if not isinstance(settings, dict):
         raise ValueError("Task configuration snapshot must contain an object in config")
-    return _migrate_sections(settings), "config" in payload
+    settings = _migrate_sections(settings)
+    wrapped = "config" in payload
+    complete_snapshot = wrapped and {"spec_hash", "geometry_hash"}.issubset(payload)
+    if complete_snapshot:
+        # 缺少该段的历史快照属于45维足高代理任务；局部新JSON沿用新训练默认。
+        settings.setdefault("experiment", {"contact_source": "height", "actor_phase": False})
+    reward = settings.get("reward")
+    if isinstance(reward, dict) and isinstance(reward.get("scales"), dict):
+        scales = reward["scales"]
+        if "foot_clearance" in scales:
+            weight = scales["foot_clearance"]
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)) or weight != 0.0:
+                raise ValueError("Foot-clearance rewards are not supported by the mainline task; use the frozen experiment workspace")
+            if complete_snapshot:
+                # 已训练无足高实验的零项不参与数学定义，清理后仍保留原任务指纹。
+                del scales["foot_clearance"]
+                reward.pop("clearance", None)
+        if complete_snapshot:
+            # 完整旧快照没有站立速度惩罚时，必须显式保留关闭状态。
+            scales.setdefault("stand_still_joint_vel_l2", 0.0)
+    return settings, wrapped
 
 
 def _migrate_sections(settings: dict) -> dict:

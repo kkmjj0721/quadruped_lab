@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：声明指定Go2参考模型、混合专家策略、HIM命令及十二项速度奖励。"""
+"""内容：声明指定Go2参考模型、混合专家策略、HIM命令及十六项速度奖励。"""
 
 import math
 
@@ -29,10 +29,16 @@ class Go2ReferenceCfg(BaseConfig):
         episode_length_s = 20.0
         num_obs_history = 5
         history_size = num_obs_history
-        num_observations = 45
+        num_observations = 47
         num_obs = num_observations * num_obs_history
-        num_privileged_obs = 210
-        num_critic_obs = 210
+        num_privileged_obs = 234
+        num_critic_obs = 234
+
+    class experiment:
+        """步态协议；段名沿用已验证策略快照，旧配置在读取边界恢复原开关。"""
+
+        contact_source = "model"  # 想象端使用受监督接触概率；height仅用于旧快照。
+        actor_phase = True  # 原45维末尾追加sin／cos，相位与步态奖励共用时钟。
 
     class sim:
         """平地和粗糙地形共用的仿真预算；物理步长以秒计。"""
@@ -93,7 +99,7 @@ class Go2ReferenceCfg(BaseConfig):
             speed_max = 3.0
 
     class control:
-        """参考直流电机与0～2物理步延迟，动作比例为0.25×力矩上限/Kp。"""
+        """参考直流电机与0～2物理步延迟，动作比例按关节类型显式设置。"""
 
         stiffness = {"hip": _HIP_INERTIA * _FREQUENCY ** 2,
                      "thigh": _HIP_INERTIA * _FREQUENCY ** 2,
@@ -104,9 +110,7 @@ class Go2ReferenceCfg(BaseConfig):
         effort_limit = {"hip": 23.7, "thigh": 23.7, "calf": 45.43}
         velocity_limit = {"hip": 30.1, "thigh": 30.1, "calf": 20.07}
         armature = {"hip": _HIP_INERTIA, "thigh": _HIP_INERTIA, "calf": _KNEE_INERTIA}
-        action_scales = {"hip": 0.25 * 23.7 / (_HIP_INERTIA * _FREQUENCY ** 2),
-                         "thigh": 0.25 * 23.7 / (_HIP_INERTIA * _FREQUENCY ** 2),
-                         "calf": 0.25 * 45.43 / (_KNEE_INERTIA * _FREQUENCY ** 2)}
+        action_scales = {"hip": 0.25, "thigh": 0.5, "calf": 0.5}
         decimation = 4
         soft_joint_pos_limit_factor = 0.9
         delay_min_lag = 0
@@ -182,6 +186,8 @@ class Go2ReferenceCfg(BaseConfig):
         tracking_angular_variance = 0.5
         fall_angle = math.radians(70)
         fall_softness_deg = 5.0
+        stand_still_command_threshold = 0.1  # 命令平移模长加偏航绝对值不超过阈值时启用。
+        foot_slip_command_threshold = 0.1  # 命令平移模长加偏航绝对值超过阈值时启用。
 
         class gait:
             """相位按来源足名配置；软接触只用于想象近似。"""
@@ -213,3 +219,7 @@ class Go2ReferenceCfg(BaseConfig):
             lin_vel_z = -2.0
             body_orientation_l2 = -0.2
             smoothness = -0.01
+            stand_still = -2.0
+            stand_still_joint_vel_l2 = -0.1  # 仅在站立命令下约束关节速度，权重是待训练验证的初值。
+            foot_slip = -0.1
+            joint_acc_l2 = -2.5e-7

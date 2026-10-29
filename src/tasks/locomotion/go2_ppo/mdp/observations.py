@@ -1,7 +1,7 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    提供 Go2 足端状态与受速度命令控制的步态相位观测。
+    计算参考 Go2 足端状态与步态相位观测。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ def foot_height(
   env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
 ) -> torch.Tensor:
   asset: Entity = env.scene[asset_cfg.name]
-  return asset.data.site_pos_w[:, asset_cfg.site_ids, 2]  # (num_envs, num_sites)
+  return asset.data.site_pos_w[:, asset_cfg.site_ids, 2]  # 形状为环境数乘足端数。
 
 
 def foot_air_time(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
@@ -50,17 +50,12 @@ def foot_contact_forces(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tenso
   return torch.sign(forces_flat) * torch.log1p(torch.abs(forces_flat))
 
 
-def phase(
-    env: ManagerBasedRlEnv,
-    period: float,
-    command_name: str,
-    command_threshold: float = 0.1,
-) -> torch.Tensor:
+def phase(env: ManagerBasedRlEnv, period: float, command_name: str) -> torch.Tensor:
     global_phase = (env.episode_length_buf * env.step_dt) % period / period
     phase = torch.zeros(env.num_envs, 2, device=env.device)
     phase[:, 0] = torch.sin(global_phase * torch.pi * 2.0)
     phase[:, 1] = torch.cos(global_phase * torch.pi * 2.0)
-    stand_mask = torch.linalg.norm(env.command_manager.get_command(command_name), dim=1) < command_threshold
+    stand_mask = torch.linalg.norm(env.command_manager.get_command(command_name), dim=1) < 0.1
     phase = torch.where(stand_mask.unsqueeze(1), torch.zeros_like(phase), phase)
     return phase
 

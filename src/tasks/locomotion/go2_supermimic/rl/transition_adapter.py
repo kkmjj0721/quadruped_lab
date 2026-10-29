@@ -41,7 +41,7 @@ class Go2TransitionAdapter:
         self.no_terminations = no_terminations
         self.map = TerrainMap(self.cfg.terrain)
         factory = unitree_go2_flat_env_cfg if self.cfg.terrain.mode == "flat" else unitree_go2_rough_env_cfg
-        env_cfg = factory(go2_cfg=self.cfg, terrain_map=self.map)
+        env_cfg = factory(play=play, go2_cfg=self.cfg, terrain_map=self.map)
         if no_terminations:
             env_cfg.terminations = {}
         if video_height is not None:
@@ -75,6 +75,8 @@ class Go2TransitionAdapter:
             self._state = None
             self._play_commands = None
             self.last_metrics = {}
+            self._episode_reward_sums = {name: torch.zeros(self.num_envs, device=self.device)
+                                         for name in self.cfg.to_dict()["reward"]["scales"]}
         except BaseException:
             self.raw_env.close()
             raise
@@ -170,6 +172,8 @@ class Go2TransitionAdapter:
             for name in ("physical", "memory", "command", "context"):
                 getattr(self._state, name)[ids] = getattr(reset_state, name)
         self.context_version[ids] += 1
+        for values in self._episode_reward_sums.values():
+            values[ids] = 0
 
     @torch.no_grad()
     def reset(self, env_ids=None):
@@ -180,6 +184,7 @@ class Go2TransitionAdapter:
         if ids.numel() == 0:
             return self._state.detached_clone()
         self._reset_rows(ids)
+        self.last_metrics = {}
         return self._state.detached_clone()
 
     # ---------- 真实转移 ----------
@@ -209,6 +214,8 @@ class Go2TransitionAdapter:
         terms = self.task.reward_terms(before, actions, final, terminated.float())
         reward = (self.step_dt * sum(getattr(self.cfg.reward.scales, name) * value
                                      for name, value in terms.items())).detach().clone()
+        for name, value in terms.items():
+            self._episode_reward_sums[name].add_(self.step_dt * getattr(self.cfg.reward.scales, name) * value)
         velocity = self.task.tracking_velocity(final)
         linear_error = velocity[:, :2] - before.command[:, :2]
         angular_error = velocity[:, 2] - before.command[:, 2]
@@ -217,9 +224,14 @@ class Go2TransitionAdapter:
             self.terrain_curriculum.control_steps = self.raw_env.common_step_counter
         self._state = final.detached_clone()
         done_ids = (terminated | truncated).nonzero().flatten()
+        episode_metrics = {}
         if done_ids.numel():
+            # 对齐MjLab：提前结束也除以最大回合时长，包含结束步的贡献。
+            episode_metrics = {f"episode_reward/{name}": self._episode_reward_sums[name][done_ids].mean()
+                               / self.cfg.env.episode_length_s for name in terms}
             self._reset_rows(done_ids)
         self.last_metrics = {f"reward/{name}": value.mean() for name, value in terms.items()}
+        self.last_metrics.update(episode_metrics)
         self.last_metrics.update(terrain_level=self.terrain_curriculum.levels.float().mean(),
                                  command_stage_iteration=float(self.command_curriculum.iteration),
                                  tracking_linear_mse=linear_error.square().sum(-1).mean(),

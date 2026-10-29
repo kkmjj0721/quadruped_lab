@@ -1,3 +1,9 @@
+# Copyright (c) 2026-2027 zh
+"""
+内容：
+    按参考接触历史判断非法接触终止。
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

@@ -9,7 +9,9 @@
 | Go2 SuperMimic（`Unitree-Go2-SuperMimic-*`） | `logs/supermimic/<experiment_name>/<运行标识>/` | `events.out.tfevents.*` |
 | Go2 PPO（`Unitree-Go2-*`） | `logs/rsl_rl/<experiment_name>/<运行标识>/` | `events.out.tfevents.*` |
 
-SuperMimic 一次运行包含 `model_<N>.pt` 检查点、当前 `policy.onnx`、一个 TensorBoard 事件文件和一份 `task_config.json` 任务快照（播放与续训依赖）。每次保存检查点同步覆盖ONNX，元数据标识其轮次；指标口径、tag 分组与终端摘要的关系见 [日志设计](../docs/design/go2_blind_supermimic.md)。
+SuperMimic 一次运行包含 `model_<N>.pt` 检查点、当前 `policy.onnx`、一个 TensorBoard 事件文件、一份 `task_config.json` 任务快照（播放与续训依赖），以及 `params/` 下的环境、算法、运行来源 YAML 与代码差异。每次保存检查点同步覆盖ONNX，元数据标识其轮次；指标口径、tag 分组与终端摘要的关系见 [日志设计](../docs/design/go2_blind_supermimic.md)。
+
+常用曲线集中在 `Loss/`（世界模型、价值与控制损失和各自学习率）、`Train/`（回报与回合长度，`/time` 以会话秒数为横轴）、`Perf/`（吞吐及采集／学习耗时）。`Metrics/tracking/*_rmse` 与终端速度误差口径一致；`episode/` 还含完成数、失败／超时占比和回报分布，`replay/` 含占用情况。失败／超时占比只在本轮有回合结束时写入。原有标量tag保留，新记录在下次启动或续训后生效。
 
 `logs/` 已被 `.gitignore` 忽略，不纳入版本控制。
 
@@ -49,7 +51,7 @@ ssh -N -L 6006:127.0.0.1:6006 <用户名>@<远程主机>
 ## 4. 常见问题
 
 - **看不到曲线**：确认 `--logdir` 指向的运行目录内确有 `events.out.tfevents.*`；SuperMimic 不再写 `metrics.jsonl`，用旧路径找 JSONL 会找不到文件。
-- **曲线只到训练中断处**：`SummaryWriter` 按周期落盘，异常退出时最后若干轮可能未写入；以检查点 `model_<N>.pt` 的轮次为准。
+- **曲线只到训练中断处**：`SummaryWriter` 每10秒刷新待写入事件，正常关闭时完成刷新；异常退出时最后若干轮可能未写入，以检查点 `model_<N>.pt` 的轮次为准。
 - **多个事件文件**：续训或重复启动会新建运行目录，同一目录出现多个 `events.out.tfevents.*` 时 TensorBoard 会并列显示，属预期行为。
 - **端口被占用**：换 `--port`，并同步修改 SSH 转发的本地端口。
 

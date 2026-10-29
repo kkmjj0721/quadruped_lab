@@ -42,8 +42,22 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
         raise ValueError("Control decimation must be a positive integer")
     if cfg.env.num_obs_history != 5:
         raise ValueError("The Go2 actor requires exactly five history frames")
-    if (cfg.env.num_critic_obs, cfg.env.num_privileged_obs) != (210, 210):
-        raise ValueError("The 12-reward task requires 210 critic observations; use a current task configuration")
+    if cfg.experiment.contact_source not in ("height", "model"):
+        raise ValueError("The Go2 contact source must be height or model")
+    if not isinstance(cfg.experiment.actor_phase, bool):
+        raise ValueError("The Go2 actor phase flag must be boolean")
+    observation_dim = 47 if cfg.experiment.actor_phase else 45
+    if (cfg.env.num_observations, cfg.env.num_obs) != (observation_dim, observation_dim * cfg.env.num_obs_history):
+        raise ValueError("The Go2 observation dimensions must match the actor phase flag")
+    if (cfg.env.num_critic_obs, cfg.env.num_privileged_obs) != (234, 234):
+        raise ValueError("The Go2 v4 state layout requires 234 critic observations; use a current task configuration")
+    standing_velocity_weight = cfg.reward.scales.stand_still_joint_vel_l2
+    if not math.isfinite(standing_velocity_weight) or standing_velocity_weight > 0:
+        raise ValueError("Standing joint velocity weight must be finite and nonpositive")
+    for name in ("stand_still_command_threshold", "foot_slip_command_threshold"):
+        value = getattr(cfg.reward, name)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"Reward command threshold must be finite and nonnegative: {name}")
     if cfg.terrain.mode not in ("flat", "rough"):
         raise ValueError("Unsupported SuperMimic terrain mode")
     if cfg.reward.gait.period <= 0 or not 0 < cfg.reward.gait.stance_fraction < 1 or cfg.reward.gait.contact_softness <= 0:
@@ -182,7 +196,7 @@ def make_go2_supermimic_env_cfg(
 
     return ManagerBasedRlEnvCfg(
         scene=scene,
-        # adapter在真实步进后提取73维状态；本体、特权观测和历史只有任务模型一处定义。
+        # adapter在真实步进后提取97维状态；本体、特权观测和历史只有任务模型一处定义。
         observations={},
         actions=actions,
         events=events,

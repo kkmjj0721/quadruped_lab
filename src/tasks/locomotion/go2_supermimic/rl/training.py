@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
+from importlib.metadata import version
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ import subprocess
 import sys
 
 import torch
+import yaml
 from mjlab.utils.torch import configure_torch_backends
 
 from agents.supermimic.config import ExecutionConfig
@@ -113,18 +115,23 @@ def _resolve_device(requested: str) -> str:
 # ---------- 运行快照与训练装配 ----------
 
 def _run_origin(task_id: str, args: SuperMimicTrainConfig, device: str, resume: Path | None, source: Path | None) -> dict:
-    """记录足以重建一次实验的来源信息，写入事件文件而非新增JSON快照。"""
+    """收集命令、依赖版本与代码状态，供事件文本和params快照共同使用。"""
     root = Path(__file__).resolve().parents[5]
     workspace = {}
-    for name, command in (("revision", ["git", "rev-parse", "HEAD"]), ("status", ["git", "status", "--short"])):
+    for name, command in (("revision", ["git", "rev-parse", "HEAD"]),
+                          ("status", ["git", "status", "--short"]),
+                          ("diff", ["git", "diff", "HEAD", "--"])):
         try:
             result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=10, check=False)
-            workspace[name] = result.stdout.strip() if result.returncode == 0 else None
+            workspace[name] = (result.stdout if name == "diff" else result.stdout.strip()) if result.returncode == 0 else None
         except (OSError, subprocess.TimeoutExpired):
             workspace[name] = None
-    return {"task_id": task_id, "arguments": asdict(args), "device": device, "resume_from": resume,
+    return {"task_id": task_id, "started_at": datetime.now().astimezone().isoformat(),
+            "arguments": asdict(args), "device": device, "resume_from": resume,
             "task_config_source": source, "command": list(sys.argv), "python": sys.version,
-            "torch": torch.__version__, "workspace": workspace}
+            "torch": torch.__version__,
+            "packages": {name: version(name) for name in ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "tensorboard")},
+            "workspace": workspace}
 
 
 def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
@@ -149,8 +156,24 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
           f"imag_microbatch={execution.imag_microbatch}, critic_microbatch={execution.critic_microbatch}", flush=True)
     runner = make_go2_supermimic_runner(cfg, device=device, log_dir=log_dir, execution=execution)
     try:
+        # 快照反映JSON与CLI覆盖后的实际配置，普通YAML类型便于直接查看和安全回读。
+        origin = json.loads(json.dumps(_run_origin(task_id, args, device, resume, source), default=str))
+        origin.update(seed=cfg.env.seed, num_envs=cfg.env.num_envs)
+        params = log_dir / "params"
+        params.mkdir()
+        diff = origin["workspace"].pop("diff")
+        origin["workspace"]["diff_file"] = "params/git.diff" if diff is not None else None
+        if diff is not None:
+            (params / "git.diff").write_text(diff, encoding="utf-8")
+        settings = cfg.to_dict()
+        agent = {"algorithm": settings.pop("algorithm"), "config": asdict(algorithm_config(cfg)),
+                 "execution": asdict(execution), "runner": settings.pop("runner")}
+        for name in ("algo", "init_member_classes", "to_dict"):
+            settings.pop(name)
+        for filename, values in (("env.yaml", settings), ("agent.yaml", agent), ("run.yaml", origin)):
+            (params / filename).write_text(yaml.safe_dump(values, sort_keys=False, allow_unicode=True), encoding="utf-8")
         runner.logger.add_text("run/origin", "```json\n" + json.dumps(
-            _run_origin(task_id, args, device, resume, source), default=str, indent=2) + "\n```")
+            origin, indent=2) + "\n```")
         if resume is not None:
             print(f"[INFO] Loading model checkpoint from: {resume}", flush=True)
             runner.load(resume, continue_run=args.continue_run, reset_critic=args.reset_critic)

@@ -1,3 +1,9 @@
+# Copyright (c) 2026-2027 zh
+"""
+内容：
+    计算参考 Go2 速度跟踪、姿态、步态与接触奖励。
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -9,6 +15,9 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import BuiltinSensor, ContactSensor
 from mjlab.utils.lab_api.math import quat_apply_inverse
+from mjlab.utils.lab_api.string import (
+  resolve_matching_names_values,
+)
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -23,7 +32,7 @@ def track_linear_velocity(
   command_name: str,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """ 
+  """
   跟踪期望线速度
 
   数学公式:
@@ -51,7 +60,7 @@ def track_angular_velocity(
   command_name: str,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """ 
+  """
   跟踪期望角速度
 
   数学公式:
@@ -77,7 +86,7 @@ def body_orientation_l2(
   env: ManagerBasedRlEnv,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """ 
+  """
   鼓励机身平缓,维持机身水平直立
 
   数学公式:
@@ -91,7 +100,7 @@ def body_orientation_l2(
   """
   asset: Entity = env.scene[asset_cfg.name]
 
-  # If body_ids are specified, compute projected gravity for that body.
+  # 指定刚体时，计算该刚体坐标系中的重力投影。
   if asset_cfg.body_ids:
     body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # [B, N, 4]
     body_quat_w = body_quat_w.squeeze(1)  # [B, 4]
@@ -99,7 +108,7 @@ def body_orientation_l2(
     projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)  # [B, 3]
     xy_squared = torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)
   else:
-    # Use root link projected gravity.
+    # 使用根链接坐标系中的重力投影。
     xy_squared = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
   return xy_squared
 
@@ -109,14 +118,14 @@ def self_collision_cost(
   sensor_name: str,
   force_threshold: float = 10.0,
 ) -> torch.Tensor:
-  """ 
+  """
   惩罚自碰撞
 
   数学公式:
     c = Σ_{t=1..H} I( max_i ||F_{i,t}|| > F_th )   [有 force_history 时]
     c = found                                       [无 force_history 时]
 
-  符号说明: 
+  符号说明:
     H      : 传感器历史缓存步数 (history_length)
     F_{i,t}: 第 i 个接触点在子步 t 处的接触力向量
     F_th   : 判定为有效碰撞的力阈值 (force_threshold)
@@ -137,7 +146,7 @@ def body_angular_velocity_penalty(
   env: ManagerBasedRlEnv,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """ 
+  """
   惩罚指定 Body 的横滚与俯仰角速度，消除高频晃动
 
   数学公式:
@@ -150,7 +159,7 @@ def body_angular_velocity_penalty(
   asset: Entity = env.scene[asset_cfg.name]
   ang_vel = asset.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :]
   ang_vel = ang_vel.squeeze(1)
-  ang_vel_xy = ang_vel[:, :2]  # Don't penalize z-angular velocity.
+  ang_vel_xy = ang_vel[:, :2]  # 不惩罚偏航角速度。
   return torch.sum(torch.square(ang_vel_xy), dim=1)
 
 
@@ -158,7 +167,7 @@ def angular_momentum_penalty(
   env: ManagerBasedRlEnv,
   sensor_name: str,
 ) -> torch.Tensor:
-  """ 
+  """
   惩罚全机整体角动量，促成人形机器人手臂自然摆动配平。
 
   数学公式:
@@ -182,7 +191,7 @@ def feet_air_time(
   command_name: str | None = None,
   command_threshold: float = 0.1,
 ) -> torch.Tensor:
-  """ 
+  """
   奖励足端单腿支撑相的维持时长，促成交替迈步。
 
   数学公式:
@@ -225,7 +234,7 @@ def feet_clearance(
   command_threshold: float = 0.1,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """ 
+  """
   惩罚摆动足高度偏差，由水平移动速度动态加权。
 
   数学公式:
@@ -262,7 +271,7 @@ def feet_gait(
         command_name: str,
         sensor_name: str,
 ) -> torch.Tensor:
-  """ 
+  """
   基于预设周期与时钟相位显式引导指定步态 (Trot / Walk 等)。
 
   数学公式:
@@ -297,7 +306,7 @@ def feet_gait(
 
 
 class feet_swing_height:
-  """Penalize deviation from target swing height, evaluated at landing."""
+  """在落地时计算摆动足峰值高度与目标高度的偏差。"""
 
   def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
     self.sensor_name = cfg.params["sensor_name"]
@@ -407,6 +416,88 @@ def soft_landing(
       active = (total_command > command_threshold).float()
       cost = cost * active
   return cost
+
+
+class variable_posture:
+  """根据命令速度分段选择容差，奖励接近默认关节姿态。
+
+  每个关节使用独立标准差；标准差越小，允许的角度偏差越小。
+  奖励为 exp(-mean(error² / std²))。
+
+  以线速度命令范数与角速度命令绝对值之和划分三段：
+    - 低于 walking_threshold：使用 std_standing，严格保持站姿。
+    - 从 walking_threshold 到 running_threshold：使用 std_walking。
+    - 不低于 running_threshold：使用 std_running，允许较大动作。
+
+  各段标准差通过关节名称正则映射配置，例如 {".*knee.*": 0.35}。
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    asset: Entity = env.scene[cfg.params["asset_cfg"].name]
+    default_joint_pos = asset.data.default_joint_pos
+    assert default_joint_pos is not None
+    self.default_joint_pos = default_joint_pos
+
+    _, joint_names = asset.find_joints(cfg.params["asset_cfg"].joint_names)
+
+    _, _, std_standing = resolve_matching_names_values(
+      data=cfg.params["std_standing"],
+      list_of_strings=joint_names,
+    )
+    self.std_standing = torch.tensor(
+      std_standing, device=env.device, dtype=torch.float32
+    )
+
+    _, _, std_walking = resolve_matching_names_values(
+      data=cfg.params["std_walking"],
+      list_of_strings=joint_names,
+    )
+    self.std_walking = torch.tensor(std_walking, device=env.device, dtype=torch.float32)
+
+    _, _, std_running = resolve_matching_names_values(
+      data=cfg.params["std_running"],
+      list_of_strings=joint_names,
+    )
+    self.std_running = torch.tensor(std_running, device=env.device, dtype=torch.float32)
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    std_standing,
+    std_walking,
+    std_running,
+    asset_cfg: SceneEntityCfg,
+    command_name: str,
+    walking_threshold: float = 0.5,
+    running_threshold: float = 1.5,
+  ) -> torch.Tensor:
+    del std_standing, std_walking, std_running  # 未使用。
+
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+
+    linear_speed = torch.norm(command[:, :2], dim=1)
+    angular_speed = torch.abs(command[:, 2])
+    total_speed = linear_speed + angular_speed
+
+    standing_mask = (total_speed < walking_threshold).float()
+    walking_mask = (
+      (total_speed >= walking_threshold) & (total_speed < running_threshold)
+    ).float()
+    running_mask = (total_speed >= running_threshold).float()
+
+    std = (
+      self.std_standing * standing_mask.unsqueeze(1)
+      + self.std_walking * walking_mask.unsqueeze(1)
+      + self.std_running * running_mask.unsqueeze(1)
+    )
+
+    current_joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+    desired_joint_pos = self.default_joint_pos[:, asset_cfg.joint_ids]
+    error_squared = torch.square(current_joint_pos - desired_joint_pos)
+
+    return torch.exp(-torch.mean(error_squared / (std**2), dim=1))
 
 
 def stand_still(

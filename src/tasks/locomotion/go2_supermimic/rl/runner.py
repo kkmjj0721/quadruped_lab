@@ -16,6 +16,7 @@ from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
 from .transition_adapter import make_go2_supermimic_env
 from .deployment import deployment_metadata
+from .world_model import Go2WorldModel
 
 
 def algorithm_config(cfg):
@@ -31,6 +32,10 @@ def algorithm_config(cfg):
 class Go2SuperMimicRunner(SuperMimicRunner):
     _driver_metrics = {}
 
+    def _make_world_model(self):
+        """Go2接触头使用固定logit尺度，其余世界模型计算沿用通用实现。"""
+        return Go2WorldModel(self.task, self.config.wm_hidden)
+
     def _collection_step_metrics(self):
         metrics = {}
         for name, value in self.env.last_metrics.items():
@@ -38,6 +43,8 @@ class Go2SuperMimicRunner(SuperMimicRunner):
                 term = name.removeprefix("reward/")
                 metrics[f"task/reward_raw/{term}"] = value
                 metrics[f"task/reward/{term}"] = self.env.step_dt * getattr(self.env.cfg.reward.scales, term) * value
+            elif name.startswith("episode_reward/"):
+                metrics["Episode_Reward/" + name.removeprefix("episode_reward/")] = value
             else:
                 metrics[f"task/{name}"] = value
         if self.driver is not None or self.expert is not None:

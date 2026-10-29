@@ -1,9 +1,12 @@
 # Copyright (c) 2026-2027 zh
-"""内容：实现表A.6与指定HIM十二项奖励；返回未乘控制周期的奖励率。"""
+"""内容：实现表A.6、指定HIM及站立速度共十六项奖励；返回未乘控制周期的奖励率。"""
 
 import torch
 
-from .reference_state import ANGULAR_BODY, GRAVITY, JOINT_OFFSET, body_vertical_velocity, normalized_gravity, tracking_velocity
+from .reference_state import (
+    ANGULAR_BODY, CONTACT_FOUND, FOOT_VELOCITY_XY, GRAVITY, JOINT_ACCELERATION, JOINT_OFFSET, JOINT_VELOCITY,
+    body_vertical_velocity, normalized_gravity, tracking_velocity,
+)
 from .state_spec import PREVIOUS_ACTION, PREVIOUS_PREVIOUS_ACTION
 from .gait_rewards import gait_reward_terms, posture_reward
 
@@ -21,6 +24,9 @@ def reference_reward_terms(task, state, action, next_state, failure):
     sideways_lean = gravity[:, 1].square() / gravity[:, 1:3].square().sum(-1).clamp_min(1e-8)
     # heading系与世界系仅相差yaw，因此roll/pitch角速模平方不变。
     tilt_rate = (physical[:, ANGULAR_BODY].square().sum(-1) - velocity[:, 2].square()).clamp_min(0)
+    command_magnitude = state.command[:, :2].norm(dim=-1) + state.command[:, 2].abs()
+    standing = command_magnitude <= cfg.stand_still_command_threshold
+    foot_speed_squared = physical[:, FOOT_VELOCITY_XY].reshape(-1, 4, 2).square().sum(-1)
     terms = {
         "track_linear_velocity": torch.exp(-(velocity[:, :2] - state.command[:, :2]).square().sum(-1)
                                             / cfg.tracking_linear_variance),
@@ -34,6 +40,11 @@ def reference_reward_terms(task, state, action, next_state, failure):
         "body_orientation_l2": physical[:, GRAVITY][:, :2].square().sum(-1),
         "smoothness": (action - 2 * state.memory[:, PREVIOUS_ACTION]
                        + state.memory[:, PREVIOUS_PREVIOUS_ACTION]).square().sum(-1),
+        "stand_still": physical[:, JOINT_OFFSET].square().sum(-1) * standing,
+        "stand_still_joint_vel_l2": physical[:, JOINT_VELOCITY].square().sum(-1) * standing,
+        "foot_slip": (foot_speed_squared * physical[:, CONTACT_FOUND]).sum(-1)
+                     * (command_magnitude > cfg.foot_slip_command_threshold),
+        "joint_acc_l2": physical[:, JOINT_ACCELERATION].square().sum(-1),
     }
     terms.update(gait_reward_terms(task, state, next_state))
     terms["pose"] = posture_reward(task, state, next_state)

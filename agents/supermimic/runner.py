@@ -59,7 +59,7 @@ class SuperMimicRunner:
             raise ValueError("Replay capacity must exceed the world-model window by at least two")
         self.actor = make_actor(self.spec, cfg, self.task.observation_term_dims).to(self.device)
         self.policy = self.actor
-        self.model = WorldModel(self.task, cfg.wm_hidden).to(self.device)
+        self.model = self._make_world_model().to(self.device)
         self.critic = Critic(self.spec.privileged_dim, cfg.critic_hidden).to(self.device)
         self.learner = Learner(self.task, self.actor, self.model, self.critic, cfg, execution=self.execution)
         self.replay = Replay(self.spec, env.num_envs, cfg.replay_capacity, self.device)
@@ -83,9 +83,13 @@ class SuperMimicRunner:
         self._guard_falls = 0.0
         self._guard_reset_steps = 0
         if self.log_dir is not None:
-            # 运行来源只写入事件文件的TEXT面板，运行目录不再产生额外JSON快照。
+            # 算法配置同步提供TEXT面板，任务入口负责可直接查看的params快照。
             self.logger.add_text("run/configuration", "```json\n" + json.dumps(
                 {"config": asdict(cfg), "execution": asdict(self.execution)}, indent=2) + "\n```")
+
+    def _make_world_model(self):
+        """默认使用通用状态模型；任务子类可指定其输出统计语义。"""
+        return WorldModel(self.task, self.config.wm_hidden)
 
     def configure_logging(self, *, target_iteration, log_interval=1):
         if target_iteration < self.iteration or log_interval < 1:
@@ -136,6 +140,7 @@ class SuperMimicRunner:
             self.reset_collection()
         cfg = self.config
         totals = {}
+        metric_counts = {}
         reward_sum = torch.zeros((), device=self.device)
         failure_count = torch.zeros((), device=self.device)
         timeout_count = torch.zeros((), device=self.device)
@@ -180,13 +185,21 @@ class SuperMimicRunner:
             timeout_count += (result.truncated & ~result.terminated).sum()
             for name, value in self._collection_step_metrics().items():
                 totals[name] = totals.get(name, 0) + value
+                metric_counts[name] = metric_counts.get(name, 0) + 1
             self.real_steps += self.env.num_envs
-        metrics = {name: value / steps for name, value in totals.items()}
+        # 回合指标只在结束步出现，按实际出现次数平均，与RSL-RL一致。
+        metrics = {name: value / metric_counts[name] for name, value in totals.items()}
         metrics.update(real_reward=reward_sum / steps, failures=failure_count, timeouts=timeout_count,
                        reset_steps=reset_steps)
+        metrics["episode/completed"] = failure_count + timeout_count
         if self.completed_episodes:
             size = len(self.completed_episodes)
-            metrics["episode/return_mean"] = sum(item[0] for item in self.completed_episodes) / size
+            returns = [item[0] for item in self.completed_episodes]
+            metrics["episode/return_mean"] = sum(returns) / size
+            metrics["episode/return_min"] = min(returns)
+            metrics["episode/return_max"] = max(returns)
+            metrics["episode/return_std"] = math.sqrt(sum((value - metrics["episode/return_mean"]) ** 2
+                                                         for value in returns) / size)
             metrics["episode/length_steps_mean"] = sum(item[1] for item in self.completed_episodes) / size
             metrics["episode/length_seconds_mean"] = metrics["episode/length_steps_mean"] * self.task.dt
             metrics["episode/window_count"] = float(size)
@@ -270,6 +283,9 @@ class SuperMimicRunner:
             self._synchronize()
             started = time.perf_counter()
             previous_steps = self.real_steps
+            previous_model_updates = self.learner.model_updates
+            previous_actor_updates = self.learner.actor_updates
+            previous_critic_updates = self.learner.critic_updates
             metrics = self.collect(self.config.collect_steps)
             self._synchronize()
             collection_time = time.perf_counter() - started
@@ -304,15 +320,29 @@ class SuperMimicRunner:
             metrics.update(iteration=self.iteration, training_target_iteration=target, real_steps=self.real_steps,
                            real_steps_delta=delta, control_enabled=float(enabled), imagined_steps_total=self.imagined_steps,
                            world_model_updates_total=self.learner.model_updates, control_updates_total=self.learner.actor_updates,
+                           critic_updates_total=self.learner.critic_updates,
+                           world_model_updates_delta=self.learner.model_updates - previous_model_updates,
+                           control_updates_delta=self.learner.actor_updates - previous_actor_updates,
+                           critic_updates_delta=self.learner.critic_updates - previous_critic_updates,
+                           world_model_learning_rate=self.learner.model_optimizer.param_groups[0]["lr"],
+                           critic_learning_rate=self.learner.critic_optimizer.param_groups[0]["lr"],
+                           control_learning_rate=self.learner.actor_optimizer.param_groups[0]["lr"],
                            nonfinite_steps=self.learner.nonfinite_steps)
             metrics.update({"timing/collection_seconds": collection_time, "timing/world_model_seconds": model_time,
-                            "timing/control_seconds": control_time, "timing/iteration_seconds": elapsed,
+                            "timing/control_seconds": control_time, "timing/learning_seconds": model_time + control_time,
+                            "timing/iteration_seconds": elapsed,
                             "timing/session_elapsed_seconds": self.elapsed,
                             "timing/eta_seconds": self.elapsed / self.session_iterations * (target - self.iteration),
                             "performance/real_total_fps": delta / max(elapsed, 1e-9),
                             "performance/real_collection_fps": delta / max(collection_time, 1e-9),
+                            "replay/steps_per_env": self.replay.size,
+                            "replay/transitions": self.replay.size * self.env.num_envs,
+                            "replay/fill_fraction": self.replay.size / self.replay.capacity,
                             "replay/archive_size": self.archive.size})
             metrics = _numbers(metrics)
+            if metrics["episode/completed"]:
+                metrics["episode/failure_fraction"] = metrics["failures"] / metrics["episode/completed"]
+                metrics["episode/timeout_fraction"] = metrics["timeouts"] / metrics["episode/completed"]
             self._collapse_guard(metrics)
             self.logger.record(metrics)
             output.append(metrics)

@@ -27,7 +27,7 @@ uv run --no-sync python scripts/train.py Unitree-Go2-SuperMimic-Flat \
 
 Go2 PPO 任务位于 `src/tasks/locomotion/go2_ppo/`，参考任务注册为 `Unitree-Go2-Flat` 和 `Unitree-Go2-Rough`。
 
-本项目已按需求移除 `pose` 姿态奖励及对应的站立／行走／跑动标准差参数，其余奖励保留。
+任务实现完整采用相邻 `legged_wbc_mjlab/src/tasks/locomotion/go2_ppo`，包含参考姿态奖励、阶段速度课程和原始域随机化。
 
 训练和播放入口参考相邻 `legged_wbc_mjlab/scripts/train.py`、`play.py`，
 通过任务 ID 读取注册的配置和 MjLab PPO runner。训练示例：
@@ -67,31 +67,26 @@ uv run --no-sync python scripts/play.py Unitree-Go2-Flat \
 两个入口也支持 `python -m scripts.train` 和 `python -m scripts.play`。
 旧入口 `scripts/train_go2.py` 已由统一训练入口替代。
 
-环境和训练参数统一在 [Go2 配置](src/config/go2/go2_config.py) 中维护：`Go2Cfg`
-定义控制、命令、观测噪声、随机化、奖励、扫描、地形和播放参数，`Go2CfgPPO`
-定义网络、PPO 和 runner 参数。任务工厂读取配置并装配 MjLab 对象，也可传入独立实例：
+环境、奖励和课程参数见 [基础任务配置](src/tasks/locomotion/go2_ppo/go_ppo_env_cfg.py)，
+机器人与播放覆盖见 [环境工厂](src/tasks/locomotion/go2_ppo/config/env_cfgs.py)，
+网络、PPO 和 runner 默认值见 [训练配置](src/tasks/locomotion/go2_ppo/config/rl_cfg.py)。
+[Go2 配置](src/config/go2/go2_config.py) 提供机器人控制、初始状态和基础重置参数。
+任务默认使用 1 个环境，可通过 CLI 或返回的配置对象覆盖：
 
 ```python
-from src.config.go2.go2_config import Go2Cfg, Go2CfgPPO
 from src.tasks.locomotion.go2_ppo.config import (
     unitree_go2_ppo_runner_cfg,
     unitree_go2_rough_env_cfg,
 )
 
-go2_cfg = Go2Cfg()
-go2_cfg.env.num_envs = 64
-go2_cfg.commands.ranges.lin_vel_x = (-0.5, 1.0)
-go2_cfg.commands.curriculum = False  # 固定命令范围，不被速度课程覆盖。
-go2_cfg.terrain.generator["num_rows"] = 5
-env_cfg = unitree_go2_rough_env_cfg(go2_cfg=go2_cfg)
+env_cfg = unitree_go2_rough_env_cfg()
+env_cfg.scene.num_envs = 64
+env_cfg.commands["twist"].ranges.lin_vel_x = (-0.5, 1.0)
+env_cfg.curriculum.pop("command_vel")  # 固定命令范围。
 
-ppo_cfg = Go2CfgPPO()
-ppo_cfg.algorithm.learning_rate = 5e-4
-runner_cfg = unitree_go2_ppo_runner_cfg(ppo_cfg=ppo_cfg)
+runner_cfg = unitree_go2_ppo_runner_cfg()
+runner_cfg.algorithm.learning_rate = 5e-4
 ```
 
-`sim.flat` 和 `play` 分别管理平地与播放覆盖；地形生成器的 `curriculum`
-控制地形分配和地形课程。改变扫描范围、历史长度或网络尺寸后，应重新核对检查点兼容性；
-配置中的观测维度常量描述默认设置。参数来源、验证范围和独立审查见
-[配置集中设计](docs/design/go2_config_centralization.md)及其
-[审查记录](docs/review/go2_config_centralization.md)。
+复制范围、依赖差异与验证边界见 [Go2 任务设计](docs/design/go2_local_ppo.md)及其
+[审查记录](docs/review/go2_local_ppo.md)。

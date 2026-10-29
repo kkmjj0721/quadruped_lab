@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：定义指定Go2参考实现的70维状态及旧航向系平面位姿增量。"""
+"""内容：定义Go2原73维状态、24维瞬时辅助量及旧航向系平面位姿增量。"""
 
 import torch
 from torch import Tensor
@@ -16,6 +16,11 @@ KNEES = slice(46, 58)
 FEET = slice(58, 70)
 ROBOT_STATE = slice(0, 70)
 POSE = slice(70, 73)
+JOINT_ACCELERATION = slice(73, 85)
+FOOT_VELOCITY_XY = slice(85, 93)
+CONTACT_FOUND = slice(93, 97)
+AUXILIARY = slice(73, 97)
+PHYSICAL_DIM = 97
 CONTEXT_COM = slice(13, 16)
 
 

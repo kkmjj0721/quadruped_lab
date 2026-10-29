@@ -10,6 +10,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import torch
+from mjlab.managers.command_manager import NullCommandManager
 from mjlab.utils.wrappers import VideoRecorder
 
 from agents.supermimic.interfaces import append_history
@@ -18,6 +19,54 @@ from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 from ..config.train_cfg import TASK_MODES
 from .checkpoints import build_playback_policy, load_playback_source
 from .transition_adapter import make_go2_supermimic_env
+
+
+class _PlaybackCommandManager(NullCommandManager):
+    """在播放侧提供Viser速度面板，通过已有覆盖接口控制全部播放环境。"""
+
+    def __init__(self, adapter):
+        super().__init__()
+        self.active_terms = ["twist"]
+        self.adapter = adapter
+        self._enabled = None
+        self._sliders = []
+        self._command = None
+
+    def create_gui(self, server, get_env_idx, on_change=None, request_action=None):
+        """沿用参考面板的三轴速度、可调范围与归零按钮，回调只修改界面状态。"""
+        with server.gui.add_folder("速度控制"):
+            self._enabled = server.gui.add_checkbox("启用手动速度（全部环境）", initial_value=False)
+            axes = ("前进速度 vx (m/s)", "侧移速度 vy (m/s)", "转向速度 wz (rad/s)")
+            for label, bounds in zip(axes, self.adapter.cfg.commands.initial_ranges, strict=True):
+                limit = max(abs(bounds[0]), abs(bounds[1]))
+                maximum = server.gui.add_slider(f"调节范围：{label}", min=0.1, max=10.0,
+                                               step=0.1, initial_value=limit)
+                slider = server.gui.add_slider(label, min=-limit, max=limit, step=0.05, initial_value=0.0)
+
+                @maximum.on_update
+                def _(_event, target=slider, source=maximum):
+                    target.min, target.max = -source.value, source.value
+
+                self._sliders.append(slider)
+            zero = server.gui.add_button("速度归零")
+
+            @zero.on_click
+            def _(_event):
+                for slider in self._sliders:
+                    slider.value = 0.0
+
+    def update(self):
+        """在仿真线程应用界面输入；关闭手动控制后恢复任务原有命令逻辑。"""
+        command = (tuple(slider.value for slider in self._sliders)
+                   if self._enabled is not None and self._enabled.value else None)
+        if command == self._command:
+            return False
+        self.adapter.set_play_commands(command)
+        self._command = command
+        return True
+
+    def get_active_iterable_terms(self, env_idx):
+        return [("twist", self.adapter.get_state().command[env_idx].cpu().tolist())]
 
 
 class SuperMimicVideoRecorder(VideoRecorder):
@@ -32,6 +81,7 @@ class SuperMimicPlayEnv:
 
     def __init__(self, adapter):
         self.adapter = adapter
+        self.command_manager = _PlaybackCommandManager(adapter)
         self._observation = None
         self._history = None
 
@@ -45,6 +95,7 @@ class SuperMimicPlayEnv:
 
     @torch.no_grad()
     def reset(self, *, env_ids=None):
+        self._update_commands()
         state = self.adapter.reset(env_ids=env_ids)
         frame = self.adapter.task.observe(state, noisy=False)
         length = self.adapter.task.spec.history_length
@@ -56,13 +107,22 @@ class SuperMimicPlayEnv:
             self._history[env_ids] = frame[env_ids].unsqueeze(1).expand(-1, length, -1)
         return self.get_observations()
 
+    def _update_commands(self):
+        """同步当前命令与最新观测，局部重置前也更新未重置环境的决策帧。"""
+        if self.command_manager.update() and self._history is not None:
+            # 更新当前决策帧中的命令，保留旧历史帧，不额外推进历史时间。
+            self._observation = self.adapter.task.observe(self.adapter.get_state(), noisy=False)
+            self._history[:, -1] = self._observation
+
     def get_observations(self):
         if self._history is None:
             raise RuntimeError("Reset the SuperMimic playback environment before observing")
+        self._update_commands()
         return {"observation": self._observation, "history": self._history}
 
     @torch.no_grad()
     def step(self, actions):
+        self._update_commands()
         result = self.adapter.step(actions)
         frame = self.adapter.task.observe(result.next_state, noisy=False)
         history = append_history(self._history, frame)

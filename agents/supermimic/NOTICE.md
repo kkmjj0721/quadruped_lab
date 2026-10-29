@@ -8,7 +8,7 @@
 
 - 训练机制参考 [Zhengtianjin/go2-supermimic](https://github.com/Zhengtianjin/go2-supermimic/tree/d9eee9b3f248e5300e636c433255db2c1c3e086a)，已实读固定提交的 `supermimic/{train,world_model,state,buffer,imagine,driver}.py`。本目录按职责平铺对应模块：`world_model.py`（`RunningNorm`／`WorldModel`）、`policy.py`（混合专家 actor 与 critic）、`buffer.py`、`imagine.py`、`learner.py`、`runner.py`；驱动器装配留在任务侧 `src/tasks/locomotion/go2_supermimic/rl/driver.py`。
 - actor 结构参考 [wty-yy/go2_rl_gym](https://github.com/wty-yy/go2_rl_gym/tree/30e74dc507bec7a642a8c98be26081f2c6f0822d)，已实读 `rsl_rl/rsl_rl/modules/{utils,actor_critic_moe_cts}.py`、`algorithms/ac_moe_cts.py`、`legged_gym/utils/exporter.py`。
-- `MoeActor` 对齐 `utils.py:StudentMoEEncoder`：完整五帧历史（225 维）经共享 ELU 骨干(512,256)得到 8×256，按专家分组的 1×1 卷积输出 8×32，Softmax 门控加权求和后 `L2Norm` 得 32 维隐变量；隐变量与独立归一化的当前帧 45 维拼接，经 ELU MLP(512,256,128) 输出 12 维未缩放动作。
+- `MoeActor` 对齐 `utils.py:StudentMoEEncoder`的网络结构：完整五帧历史经共享ELU骨干(512,256)得到8×256，按专家分组的1×1卷积输出8×32，Softmax门控加权求和后`L2Norm`得32维隐变量；与独立归一化的当前帧拼接，经ELU MLP(512,256,128)输出12维未缩放动作。观测宽度由任务提供：当前Go2追加相位后为47／235维，旧任务仍为45／225维；输入布局属于本项目适配，不能直接互换旧权重。
 - 历史与当前帧使用两套独立 `RunningNorm`，门控输入为归一化后的完整历史。这是本项目在指定参考的统计归一化上适配 MoE 输入的方案；`go2_rl_gym` 源码使用固定观测缩放，不能将两套运行统计描述为其原有机制。
 - 只借用 MoECTS 学生部署网络，不引入教师、蒸馏或门控负载均衡目标。策略仅最大化参考的想象回报。
 - 状态字典键名与 `go2_rl_gym` 的 `StudentMoEEncoder` 完全一致，同权重前向逐位相等；`MoeActor.load_pretrained` 可按预训练导出名的展平命名热启动，已对 `go2_moe_cts_137k_0.6739.pt` 验证动作差 ≤1e-6。

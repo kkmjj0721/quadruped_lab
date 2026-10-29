@@ -1,3 +1,9 @@
+# Copyright (c) 2026-2027 zh
+"""
+内容：
+    注册 Go2 平地与粗糙地形 PPO 任务。
+"""
+
 from mjlab.tasks.registry import register_mjlab_task
 from src.tasks.locomotion.go2_ppo.rl import VelocityOnPolicyRunner
 

@@ -24,8 +24,13 @@ from ..mdp.state_spec import JOINT_NAMES
 def deployment_metadata(cfg, *, spec_hash: str, algorithm) -> dict:
     """只从任务配置与算法配置派生，保证离线导出与部署检查使用同一份语义。"""
     control = cfg.control
+    phase_enabled = cfg.experiment.actor_phase
+    phase_layout = [{"name": "gait_phase_sin_cos", "width": 2}] if phase_enabled else []
+    width = 47 if phase_enabled else 45
     return {
         "spec_hash": spec_hash, "algorithm": "moe_history_encoder",
+        "input_shape": [None, width * cfg.env.num_obs_history],
+        "observation_dim": width, "history_length": cfg.env.num_obs_history,
         "observation_layout": [
             {"name": "base_angular_velocity_body", "width": 3},
             {"name": "projected_gravity_body", "width": 3},
@@ -33,7 +38,7 @@ def deployment_metadata(cfg, *, spec_hash: str, algorithm) -> dict:
             {"name": "joint_velocity", "width": 12},
             {"name": "previous_unscaled_action", "width": 12},
             {"name": "velocity_command_heading_xy_world_yaw", "width": 3},
-        ],
+        ] + phase_layout,
         "joint_names": list(JOINT_NAMES), "action_joint_names": list(JOINT_NAMES),
         "default_joint_positions": [float(cfg.init_state.default_joint[name]) for name in JOINT_NAMES],
         "action_scales": [control.action_scales[name] for _ in range(4) for name in ("hip", "thigh", "calf")],
@@ -48,6 +53,15 @@ def deployment_metadata(cfg, *, spec_hash: str, algorithm) -> dict:
                             "gate": "softmax_over_experts",
                             "current_frame_fused_with_latent": True},
         "velocity_input": "not_observed_estimated_from_history",
+        "gait_phase": {
+            "observed": phase_enabled, "columns": [45, 46] if phase_enabled else [],
+            "clock": "episode_elapsed_time", "period_seconds": cfg.reward.gait.period,
+            "phase_formula": "(round(episode_elapsed_time / control_dt) % (period / control_dt)) / (period / control_dt)",
+            "feature_order": ["sin(2*pi*phase)", "cos(2*pi*phase)"],
+            "command_magnitude_formula": "l2(command[:2]) + abs(command[2])",
+            "moving_condition": "command_magnitude > standing_command_threshold",
+            "standing_command_threshold": cfg.reward.gait.command_threshold, "standing_features": "zero",
+        },
         "reference_commit": "d9eee9b3f248e5300e636c433255db2c1c3e086a",
     }
 
@@ -60,8 +74,13 @@ def checkpoint_actor(checkpoint: dict):
         raise ValueError("Checkpoint contains non-finite policy tensors")
     spec = AlgorithmSpec(**checkpoint["spec"])
     algorithm = SuperMimicConfig(**checkpoint["config"])
-    # 观测分段宽度是任务侧常量，装配策略时不需要创建仿真器。
-    actor = make_actor(spec, algorithm, Go2ReferenceTaskModel.observation_term_dims)
+    if spec.observation_dim not in (45, 47):
+        raise ValueError(f"Unsupported Go2 policy observation dimension: {spec.observation_dim}")
+    if spec.history_length != 5:
+        raise ValueError(f"Unsupported Go2 policy history length: {spec.history_length}")
+    # 旧策略保持45列，新策略只在末尾追加两列相位，离线装配不创建仿真器。
+    terms = Go2ReferenceTaskModel.observation_term_dims + ((2,) if spec.observation_dim == 47 else ())
+    actor = make_actor(spec, algorithm, terms)
     actor.load_state_dict(checkpoint["actor"], strict=True)
     return actor.eval().requires_grad_(False), algorithm
 
@@ -83,6 +102,12 @@ def export_checkpoint(checkpoint_path: str | Path, directory: str | Path, *, ite
     apply_settings(cfg, settings, replace_mappings=True)
     if json.loads(snapshot_path.read_text(encoding="utf-8")).get("spec_hash") != checkpoint.get("spec_hash"):
         raise ValueError("Checkpoint and task snapshot metadata mismatch")
+    expected_width = 47 if cfg.experiment.actor_phase else 45
+    if (checkpoint["spec"]["observation_dim"] != expected_width
+            or cfg.env.num_observations != expected_width
+            or checkpoint["spec"]["history_length"] != cfg.env.num_obs_history
+            or cfg.env.num_obs != expected_width * cfg.env.num_obs_history):
+        raise ValueError("Checkpoint observation layout differs from the saved task configuration")
     actor, algorithm = checkpoint_actor(checkpoint)
     iteration = checkpoint["iteration"] if iteration is None else iteration
     if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
