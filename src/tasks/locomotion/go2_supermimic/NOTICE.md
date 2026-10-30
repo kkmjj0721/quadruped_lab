@@ -17,4 +17,4 @@
 | 站立关节速度 | 来源安装的MjLab1.6 `envs/mdp/rewards.py:joint_vel_l2`；本项目 `mdp/reference_rewards.py:stand_still_joint_vel_l2` | 复用关节速度平方和公式，新增与站立角度项相同的起点命令门控；−0.1是本项目待训练验证的初值，不是来源推荐权重。真实／想象复用原有关节速度状态，不增加模型维度；已有十五项v4快照显式禁用本项并保留原指纹 |
 | MjLab / MuJoCo | 本机 MjLab1.6.0、MuJoCo3.11.0、MuJoCo-Warp3.11.0；参考本地环境MuJoCo3.17.0、MuJoCo-Warp3.13.0 | 参数与算法按参考；来源依赖未固定MuJoCo/Warp版本，不能声称两环境轨迹数值一致。当前Warp无来源的迭代告警位，省略对应纯日志startup事件，不增加兼容回退。终端摘要保留当前格式 |
 
-短流程只验证实现与运行接口，不能证明长期行走收敛、论文性能或真机部署效果。当前设计和验收范围见 [设计](../../../../docs/design/go2_blind_supermimic.md) 与 [独立审查记录](../../../../docs/review/go2_blind_supermimic.md)。
+短流程只验证实现与运行接口，不能证明长期行走收敛、论文性能或真机部署效果。当前任务和验证范围见 [任务说明](../../../../docs/go2_supermimic.md)。

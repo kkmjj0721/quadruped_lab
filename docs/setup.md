@@ -1,5 +1,7 @@
 # 安装配置
 
+文中的本地工作记录位于 `docs/work/`，不随仓库提交。
+
 本项目参考相邻 `legged_wbc_mjlab` 的 uv 安装方式，单独维护依赖声明、锁文件和 `.venv`。当前已提供环境安装与检查入口，基础 PPO 已迁入 `agents/base/`，机器人训练入口、评估和任务逻辑仍待开发。
 
 ## 环境与版本
@@ -168,6 +170,6 @@ uv sync --locked --extra cu130 --check
 uv pip check --python .venv/bin/python
 ```
 
-环境验收与独立审查记录见 [安装环境设计](design/installation.md) 和 [安装配置审查](review/installation.md)。
+本地环境验收与独立审查记录见 [安装环境设计](work/design/installation.md) 和 [安装配置审查](work/review/installation.md)。
 
-下载加速设计与验收见 [下载测速与回退](design/download_acceleration.md) 及 [下载加速审查](review/download_acceleration.md)。
+本地下载加速设计与验收见 [下载测速与回退](work/design/download_acceleration.md) 及 [下载加速审查](work/review/download_acceleration.md)。

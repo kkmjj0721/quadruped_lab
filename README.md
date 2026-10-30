@@ -87,6 +87,3 @@ env_cfg.curriculum.pop("command_vel")  # 固定命令范围。
 runner_cfg = unitree_go2_ppo_runner_cfg()
 runner_cfg.algorithm.learning_rate = 5e-4
 ```
-
-复制范围、依赖差异与验证边界见 [Go2 任务设计](docs/design/go2_local_ppo.md)及其
-[审查记录](docs/review/go2_local_ppo.md)。

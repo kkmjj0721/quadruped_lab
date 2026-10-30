@@ -1,5 +1,7 @@
 # 盲走基础地形
 
+文中的本地工作记录位于 `docs/work/`，不随仓库提交。
+
 实现位于 `src/terrain/blind/`，使用 MjLab 1.6.0 的 `SubTerrainCfg`，可直接交给地形生成器或场景配置。机器人前进参考为局部 `+X`；正/倒金字塔楼梯及正/倒金字塔坡的出生参考点位于地块中心平台，其他地形的出生参考点位于起始平台；机器人机身高度需在任务重置时另加。
 
 | 名称 | 配置类型 | 默认参数与含义 |
@@ -80,7 +82,7 @@ random_cfg.sub_terrains["rough"].proportion = 2.0
 uv run --no-sync python -B -m unittest discover -s tests/test_terrain -v
 ```
 
-本项目已验证事实：测试覆盖六类地形的编译和平台原点、零难度退化、正/倒金字塔同心台阶、正/倒金字塔坡中心平台与边框、随机种子及起伏范围、非整除平台边界、课程/随机地块组合，以及球体落地接触。实际渲染结果见 `outputs/terrain/blind/`；整套训练场景装配截图见 `outputs/terrain/training_cfg/`。具体结果与独立审查见 [设计记录](design/custom_terrain.md) 和 [审查记录](review/custom_terrain.md)。
+本项目已验证事实：测试覆盖六类地形的编译和平台原点、零难度退化、正/倒金字塔同心台阶、正/倒金字塔坡中心平台与边框、随机种子及起伏范围、非整除平台边界、课程/随机地块组合，以及球体落地接触。实际渲染结果见 `outputs/terrain/blind/`；整套训练场景装配截图见 `outputs/terrain/training_cfg/`。具体结果与独立审查见本地工作目录中的 [设计记录](work/design/custom_terrain.md) 和 [审查记录](work/review/custom_terrain.md)。
 
 本地 MuJoCo 3.11.0 的 `mj_ray` 在部分恰落高度图网格行的射线上可能返回底面；测试轮廓使用非网格行坐标，并另测原点和实体接触。该观察不等于已证实物理碰撞失效，也不影响本次真实渲染结果；后续若使用高度射线观测，应单独验证所用传感器后端。
 

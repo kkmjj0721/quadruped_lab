@@ -14,8 +14,5 @@ MUJOCO_LOG.TXT
 # 本地测试文件与产物
 /tests/
 
-# 本地开发工作流、设计与审查记录
-/docs/DEVELOPMENT_WORKFLOW.md
-/docs/COLLABORATION_REVIEW.md
-/docs/design/
-/docs/review/
+# 本地工作文档及配图
+/docs/work/

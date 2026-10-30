@@ -870,7 +870,7 @@ LAFAN1 实验使用 40 个片段、2.45 小时数据。PPO-Sim 对齐动作、�
 | L4 | [奖励实现](../src/tasks/locomotion/go2_ppo/mdp/rewards.py) | 速度坐标、布尔步态项与落地事件 |
 | L5 | [MjLab runner](../.venv/lib/python3.11/site-packages/mjlab/rl/runner.py)、[RSL-RL runner](../.venv/lib/python3.11/site-packages/rsl_rl/runners/on_policy_runner.py)、[RSL-RL PPO](../.venv/lib/python3.11/site-packages/rsl_rl/algorithms/ppo.py) | 已安装 MjLab 1.6.0／RSL-RL 5.4.2 的继承关系、采样与 PPO 更新 |
 | L6 | [本地 PPO](../agents/base/algorithms/ppo.py)、[本地 runner](../agents/base/runners/on_policy_runner.py)、[本地策略模型](../agents/base/models/mlp_model.py) | 与主执行路径区分，用于理解本仓库通用 PPO 组件 |
-| L7 | [Go2 任务设计](../docs/design/go2_local_ppo.md)、[算法目录设计](../docs/design/agents_base_ppo.md)、[训练入口设计](../docs/design/train_play_entries.md) | 查阅已有模块边界，实际执行路径以当前源码为准 |
+| L7 | [Go2 任务设计](../docs/work/design/go2_local_ppo.md)、[算法目录设计](../docs/work/design/agents_base_ppo.md)、[训练入口设计](../docs/work/design/train_play_entries.md) | 查阅已有模块边界，实际执行路径以当前源码为准；这些是本地工作记录，不随仓库提交 |
 
 `.venv` 链接用于本机定位，在未建立相同虚拟环境的副本中可能不存在；版本约束见 [pyproject.toml](../pyproject.toml)。源码位置不构成安装目录修改建议。
 
@@ -883,4 +883,4 @@ LAFAN1 实验使用 40 个片段、2.45 小时数据。PPO-Sim 对齐动作、�
 
 R1 使用可微仿真，R2 使用 G1 动作跟踪；两者与本项目 Go2 速度控制的机器人、执行器、任务和依赖条件有差异。本文没有运行它们的代码，没有将其成绩作为本项目验证。实现或正式复现实验前，应固定参考提交并记录自行补充的接口决定。
 
-其他开源项目与数据资源统一见 [SuperMimic 相关项目索引](../docs/supermimic_projects.md)，其中 [Go2-SuperMimic 专项说明](../docs/supermimic_projects.md#31-go2-supermimic)记录了四足追逐／闪避任务、预训练权重及适用限制；本文不重复维护仓库清单与动态指标。
+其他开源项目与数据资源统一见本地工作目录中的 [SuperMimic 相关项目索引](../docs/work/supermimic_projects.md)，其中 [Go2-SuperMimic 专项说明](../docs/work/supermimic_projects.md#31-go2-supermimic)记录了四足追逐／闪避任务、预训练权重及适用限制；本文不重复维护仓库清单与动态指标。

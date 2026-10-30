@@ -41,8 +41,10 @@ class Go2SuperMimicRunner(SuperMimicRunner):
         for name, value in self.env.last_metrics.items():
             if name.startswith("reward/"):
                 term = name.removeprefix("reward/")
+                weight = getattr(self.env.cfg.reward.scales, term)
                 metrics[f"task/reward_raw/{term}"] = value
-                metrics[f"task/reward/{term}"] = self.env.step_dt * getattr(self.env.cfg.reward.scales, term) * value
+                metrics[f"task/reward/{term}"] = self.env.step_dt * weight * value
+                metrics[f"Reward_Rate/{term}"] = weight * value
             elif name.startswith("episode_reward/"):
                 metrics["Episode_Reward/" + name.removeprefix("episode_reward/")] = value
             else:

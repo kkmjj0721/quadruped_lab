@@ -2,9 +2,11 @@
 
 # Go2 SuperMimic 盲速度跟踪
 
+文中的本地工作记录位于 `docs/work/`，不随仓库提交。
+
 默认训练对齐指定 [Go2-SuperMimic](https://github.com/Zhengtianjin/go2-supermimic/tree/d9eee9b3f248e5300e636c433255db2c1c3e086a) 的训练结构、地形和物理随机化，actor 改用 [go2_rl_gym](https://github.com/wty-yy/go2_rl_gym/tree/30e74dc507bec7a642a8c98be26081f2c6f0822d) 的 MoECTS 学生部署网络。速度奖励保留 [SuperMimic 英文 v1](../paper/SuperMimic_2610.28480v1.pdf) 第16页表 A.6 六项，再增加指定 HIM 步态／腾空、垂向速度／姿态／动作二阶差分、站立／滑移／关节加速度、Go2 PPO 姿态奖励及本项目的站立关节速度约束；命令采用 HIM 的 heading 逻辑。策略读取本体历史、速度命令和步态相位，不含真实线速度输入；线速度由历史隐式估计。没有教师、蒸馏或 PPO 更新。
 
-这属于用户确认的从零 Go2 速度控制迁移。原论文速度接口与动作模仿联合训练，参考仓库任务是追逐和闪避；本项目没有复现其动作库先验或演示成绩。集中配置见 [Go2ReferenceCfg](../src/config/go2/go2_reference_supermimic_config.py)，算法来源见 [NOTICE](../agents/supermimic/NOTICE.md)，资产来源见 [参考资产说明](../src/assets/robots/go2/REFERENCE_NOTICE.md)。与本仓库的逐项差异见[对比报告](analysis/go2_supermimic_vs_reference.md)，与相邻 `go2_him` 任务在命令采样、MDP 组装、奖励终止上的对齐评估见[任务层对齐评估](analysis/go2_supermimic_vs_go2_him.md)。
+这属于用户确认的从零 Go2 速度控制迁移。原论文速度接口与动作模仿联合训练，参考仓库任务是追逐和闪避；本项目没有复现其动作库先验或演示成绩。集中配置见 [Go2ReferenceCfg](../src/config/go2/go2_reference_supermimic_config.py)，算法来源见 [NOTICE](../agents/supermimic/NOTICE.md)，资产来源见 [参考资产说明](../src/assets/robots/go2/REFERENCE_NOTICE.md)。本地工作记录中，与本仓库的逐项差异见[对比报告](work/analysis/go2_supermimic_vs_reference.md)，与相邻 `go2_him` 任务在命令采样、MDP 组装、奖励终止上的对齐评估见[任务层对齐评估](work/analysis/go2_supermimic_vs_go2_him.md)。
 
 ## 训练
 
@@ -57,11 +59,11 @@ actor为混合专家历史编码器：235维历史经共享ELU骨干(512,256)与
 
 ## 保存、续训、播放与评估
 
-产物位于 `logs/supermimic/go2_supermimic/<运行标识>/`，包含 `model_N.pt`（参数、优化器与计数）、`policy.onnx`（最近保存点的完整actor）、`events.out.tfevents.*`（TensorBoard逐轮标量与运行来源）和 `task_config.json`（任务快照，播放入口与续训依赖）。每 `--save-interval` 轮及最后一轮同步保存模型并覆盖当前ONNX；保留参考塌缩护栏，存在预警时跳过该保存点，继续保留上次模型与ONNX。ONNX元数据记录轮次和任务指纹。终端仍逐 `--log-interval` 轮打印原80列摘要；曲线操作见 [TensorBoard指南](../doc/TENSORBOARD_REMOTE.md)。
+产物位于 `logs/supermimic/go2_supermimic/<运行标识>/`，包含 `model_N.pt`（参数、优化器与计数）、`policy.onnx`（最近保存点的完整actor）、`events.out.tfevents.*`（TensorBoard逐轮标量与运行来源）和 `task_config.json`（任务快照，播放入口与续训依赖）。每 `--save-interval` 轮及最后一轮同步保存模型并覆盖当前ONNX；保留参考塌缩护栏，存在预警时跳过该保存点，继续保留上次模型与ONNX。ONNX元数据记录轮次和任务指纹。终端仍逐 `--log-interval` 轮打印原80列摘要；曲线操作见本地 [TensorBoard指南](work/TENSORBOARD_REMOTE.md)。
 
 新启动的训练另在 `params/` 集中保存 `env.yaml`（覆盖后的任务、奖励、命令及仿真参数）、`agent.yaml`（算法预算、执行分批与驱动配置）、`run.yaml`（命令、实际种子／环境数、依赖版本、续训来源和代码状态）及 `git.diff`（已跟踪文件相对HEAD的差异）。`task_config.json` 仍用于播放与续训；这些YAML供查看和比较实验配置，不直接作为 `--task-config` 输入。事件文件新增 `Loss/Train/Perf` 常用分组、速度RMSE、回合结束比例、回报分布、回放占用和三个优化器的实际学习率；原始tag保留。
 
-奖励分项按 Go2 HIM 的 `Episode_Reward/<name>` 打印并写入同名事件标量：回合累计加权奖励除以配置的最大回合时长，提前结束也使用该分母；本轮没有回合结束时省略分项。`Mean reward` 仍为最近最多100个已结束回合的平均累计总分；原有 `task/reward/*` 单步贡献和 `task/reward_raw/*` 原始评分仅保留在事件标量中。新格式在下次启动或续训时生效，具体口径见[日志设计](design/go2_blind_supermimic.md#2026-10-29奖励分项对齐-go2-him)。
+终端每轮显示 `Reward_Rate/<name>`：本轮真实采集中所有环境的原始评分均值乘配置权重，不乘控制周期，从首次采集起就有实际数值，不等待回合结束、也不使用占位或旧值。当前两个速度跟踪项的上限均为2；所有分项相加再乘控制周期，等于本轮平均单步奖励。该实时口径是用户指定的显示适配，不能当作HIM已结束回合统计。`Mean reward` 与 `Mean episode length` 仍为最近最多100个已结束回合的均值，无历史回合时省略这两行。TensorBoard逐轮增加同名 `Reward_Rate/*` 标量；原有 `task/reward/*` 单步贡献、`task/reward_raw/*` 原始评分及 `Episode_Reward/*` 回合统计继续保留，后者仍为结束回合的累计加权奖励除以最大回合时长、仅有数据时写入。新格式在下次启动或续训时生效，具体口径见本地[日志设计](work/design/go2_blind_supermimic.md#2026-10-29奖励分项对齐-go2-him)。
 
 新部署策略输入`[B,235]`、输出`[B,12]`，图内包含归一化、MoE编码器和动作MLP；旧45维策略仍导出`[B,225]`输入。heading目标采样、相位生成和历史维护均由调用方在图外完成；元数据记录实际布局、时钟／站立门控、关节顺序、默认姿态、动作比例和命令坐标系。需要带轮次的PT／ONNX／JSON三件套时可显式导出：
 
@@ -109,7 +111,7 @@ RUN_SUPERMIMIC_HIM_LONG=1 OMP_NUM_THREADS=1 .venv/bin/python -B -m unittest \
 
 常规测试不自动启动训练。显式CPU检查用4环境和小网络，flat/rough各4轮；GPU检查用完整参考网络、64环境、64个模型窗口和128条想象，保留8步拟合与32步想象。两者均检查实际参数更新、保存/恢复、播放和部署。算法/任务对拍分别读取 `GO2_RL_GYM_ROOT`（混合专家编码器）与 `GO2_SUPERMIMIC_REFERENCE`（参考任务语义），均指定上述固定提交仓库；缺少参考源码时该对拍项明确跳过。
 
-长训练检查保持完整网络、64环境及缩减的采样批量，初始化和首次编译完成后实际训练660秒，结束后统一检查指标、检查点、ONNX和继续训练。源代码快照、配置与退出状态保留在独立验证产物中。实际执行与独立审查维护在 [同主题审查记录](review/go2_blind_supermimic.md)；运行检查只能证明对应环节可用，不能代替收敛与真机验收。
+长训练检查保持完整网络、64环境及缩减的采样批量，初始化和首次编译完成后实际训练660秒，结束后统一检查指标、检查点、ONNX和继续训练。源代码快照、配置与退出状态保留在独立验证产物中。实际执行与独立审查维护在本地 [同主题审查记录](work/review/go2_blind_supermimic.md)；运行检查只能证明对应环节可用，不能代替收敛与真机验收。
 
 ## 配置版本
 

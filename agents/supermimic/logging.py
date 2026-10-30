@@ -57,7 +57,7 @@ def _numeric_metrics(metrics: Mapping[str, Real]) -> dict[str, int | float]:
 
 
 def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -> str:
-    """按Go2 HIM的80列单块样式显示训练摘要和回合奖励分项。"""
+    """按Go2 HIM的80列单块样式显示训练摘要和实时奖励率。"""
     _positive_integer("num_envs", num_envs)
     values = _numeric_metrics(metrics)
 
@@ -118,7 +118,7 @@ def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -
     if "task/action_rms" in values:
         lines.append(row("Metrics/action_rms", number("task/action_rms")))
     for key in values:
-        if key.startswith("Episode_Reward/"):
+        if key.startswith("Reward_Rate/"):
             lines.append(row(key, number(key)))
     iteration_time = number("timing/iteration_seconds", decimals=2)
     if "timing/iteration_seconds" in values:
