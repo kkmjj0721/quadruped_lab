@@ -92,8 +92,9 @@ def read_settings(path: Path) -> tuple[dict, bool]:
                 del scales["foot_clearance"]
                 reward.pop("clearance", None)
         if complete_snapshot:
-            # 完整旧快照没有站立速度惩罚时，必须显式保留关闭状态。
-            scales.setdefault("stand_still_joint_vel_l2", 0.0)
+            # 完整旧快照缺失的新增奖励必须显式保留关闭状态，局部JSON沿用新默认。
+            for name in ("stand_still_joint_vel_l2", "stumble", "joint_torques_l2"):
+                scales.setdefault(name, 0.0)
     return settings, wrapped
 
 

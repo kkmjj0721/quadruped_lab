@@ -1,10 +1,10 @@
 # Copyright (c) 2026-2027 zh
-"""内容：装配指定 go2-supermimic 参考 MJCF、直流电机与完整碰撞。"""
+"""内容：装配指定 go2-supermimic 参考 MJCF、内置位置执行器与完整碰撞。"""
 
 from pathlib import Path
 
 import mujoco
-from mjlab.actuator import DcMotorActuatorCfg
+from mjlab.actuator import BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.spec_config import CollisionCfg
 
@@ -16,10 +16,9 @@ def get_spec() -> mujoco.MjSpec:
 def get_reference_go2_robot_cfg(cfg) -> EntityCfg:
     """参数来自集中配置；与旧 PPO、CTS、MoE 资产装配相互独立。"""
     control = cfg.control
-    actuators = tuple(DcMotorActuatorCfg(
+    actuators = tuple(BuiltinPositionActuatorCfg(
         target_names_expr=(f".*_{name}_joint",), stiffness=control.stiffness[name], damping=control.damping[name],
-        effort_limit=control.effort_limit[name], saturation_effort=2 * control.effort_limit[name],
-        velocity_limit=control.velocity_limit[name], armature=control.armature[name],
+        effort_limit=control.effort_limit[name], armature=control.armature[name],
         delay_min_lag=control.delay_min_lag, delay_max_lag=control.delay_max_lag,
         delay_hold_prob=control.delay_hold_prob, delay_update_period=control.delay_update_period,
     ) for name in ("hip", "thigh", "calf"))

@@ -49,8 +49,17 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
     observation_dim = 47 if cfg.experiment.actor_phase else 45
     if (cfg.env.num_observations, cfg.env.num_obs) != (observation_dim, observation_dim * cfg.env.num_obs_history):
         raise ValueError("The Go2 observation dimensions must match the actor phase flag")
-    if (cfg.env.num_critic_obs, cfg.env.num_privileged_obs) != (234, 234):
-        raise ValueError("The Go2 v4 state layout requires 234 critic observations; use a current task configuration")
+    critic_dimensions = (cfg.env.num_critic_obs, cfg.env.num_privileged_obs)
+    if critic_dimensions not in ((234, 234), (258, 258)):
+        raise ValueError("The Go2 state layout requires 258 critic observations or the legacy 234 layout")
+    for name in ("stumble", "joint_torques_l2"):
+        value = getattr(cfg.reward.scales, name)
+        if not math.isfinite(value) or value > 0:
+            raise ValueError(f"Reward weight must be finite and nonpositive: {name}")
+        if critic_dimensions == (234, 234) and value != 0:
+            raise ValueError("Force rewards require the current 258-observation task configuration")
+    if not math.isfinite(cfg.reward.stumble_ratio) or cfg.reward.stumble_ratio <= 0:
+        raise ValueError("Stumble force ratio must be positive and finite")
     standing_velocity_weight = cfg.reward.scales.stand_still_joint_vel_l2
     if not math.isfinite(standing_velocity_weight) or standing_velocity_weight > 0:
         raise ValueError("Standing joint velocity weight must be finite and nonpositive")
@@ -196,7 +205,7 @@ def make_go2_supermimic_env_cfg(
 
     return ManagerBasedRlEnvCfg(
         scene=scene,
-        # adapter在真实步进后提取97维状态；本体、特权观测和历史只有任务模型一处定义。
+        # adapter在真实步进后提取任务状态；本体、特权观测和历史只有任务模型一处定义。
         observations={},
         actions=actions,
         events=events,

@@ -16,7 +16,7 @@ from .commands import advance_commands, heading_command, sample_commands
 from .gait_rewards import gait_phase
 from .reference_state import (
     ANGULAR_BODY, AUXILIARY, CONTACT_FOUND, CONTEXT_COM, FEET, GRAVITY, HEIGHT, JOINT_OFFSET,
-    JOINT_VELOCITY, PHYSICAL_DIM, POSE,
+    JOINT_VELOCITY, LEGACY_PHYSICAL_DIM, PHYSICAL_DIM, POSE,
     ROBOT_STATE, VELOCITY_HEADING, apply_pose_delta, pose_delta, tracking_velocity, yaw_rotate_inverse,
 )
 from .state_spec import (
@@ -29,7 +29,7 @@ from .state_spec import (
 class Go2ReferenceTaskModel:
     """独立实现参考Go2的状态、命令、观测、奖励与回放事件接口。"""
 
-    model_input_dim = 211
+    model_input_dim = 235
     observation_term_dims = (3, 3, 12, 12, 12, 3)
 
     def __init__(self, cfg, default_joint_pos: Tensor, joint_limits: Tensor, surface, device="cpu"):
@@ -37,6 +37,10 @@ class Go2ReferenceTaskModel:
         self.device = torch.device(device)
         self.surface = surface
         self.dt = cfg.sim.timestep * cfg.control.decimation
+        self.force_rewards = cfg.env.num_critic_obs == 258
+        self.physical_dim = PHYSICAL_DIM if self.force_rewards else LEGACY_PHYSICAL_DIM
+        self.auxiliary = slice(AUXILIARY.start, self.physical_dim)
+        self.model_input_dim = self.physical_dim + 114
         self.observation_term_dims = type(self).observation_term_dims + ((2,) if cfg.experiment.actor_phase else ())
         self.default_joint_pos = torch.as_tensor(default_joint_pos, device=self.device, dtype=torch.float32).clone()
         self.joint_limits = torch.as_tensor(joint_limits, device=self.device, dtype=torch.float32).clone()
@@ -66,10 +70,13 @@ class Go2ReferenceTaskModel:
         payload = {"task": self._semantic_config(), "geometry": surface.geometry_hash,
                    "default_joint_pos": self.default_joint_pos.cpu().tolist(),
                    "joint_limits": self.joint_limits.cpu().tolist(),
-                   "layout": "go2_reference_state70_pose3_motion_aux24_v4"}
+                   "layout": ("go2_reference_state70_pose3_motion_force_aux48_v5" if self.force_rewards else
+                              "go2_reference_state70_pose3_motion_aux24_v4")}
         self.semantic_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
-        self.spec = AlgorithmSpec(PHYSICAL_DIM, PHYSICAL_DIM, 12, sum(self.observation_term_dims), 234, 26, MEMORY_DIM, 3,
-                                  "go2_reference_velocity_v4:" + self.semantic_hash,
+        version = "v5" if self.force_rewards else "v4"
+        self.spec = AlgorithmSpec(self.physical_dim, self.physical_dim, 12, sum(self.observation_term_dims),
+                                  cfg.env.num_critic_obs, 26, MEMORY_DIM, 3,
+                                  f"go2_reference_velocity_{version}:" + self.semantic_hash,
                                   model_id="supermimic_moe_v1")
 
     def _semantic_config(self) -> dict:
@@ -85,6 +92,11 @@ class Go2ReferenceTaskModel:
         # 禁用新增站立速度项时保留已有十五项v4快照的指纹，非零权重标识新任务语义。
         if config["reward"]["scales"]["stand_still_joint_vel_l2"] == 0.0:
             del config["reward"]["scales"]["stand_still_joint_vel_l2"]
+        # 完整旧快照由读取边界补零，保留97维协议及其原始语义指纹。
+        if not self.force_rewards:
+            del config["reward"]["scales"]["stumble"]
+            del config["reward"]["scales"]["joint_torques_l2"]
+            del config["reward"]["stumble_ratio"]
         names = [name for name in ("algo", "single") if name in config]
         if names == ["single"]:
             return config
@@ -106,7 +118,7 @@ class Go2ReferenceTaskModel:
         self.foot_ids, _ = robot.find_sites(FOOT_NAMES, preserve_order=True)
 
     def read_physical(self, env) -> Tensor:
-        """保留原状态，追加最后forward后的qacc、世界足速和真实接触标记。"""
+        """读取最后forward后的瞬时量；新协议另含世界接触力与实际执行器力矩。"""
         data = env.scene["robot"].data
         sensor = env.scene["feet_ground_contact"].data
         position, yaw = data.root_link_pos_w, data.heading_w
@@ -114,12 +126,13 @@ class Go2ReferenceTaskModel:
                  data.site_pos_w[:, self.foot_ids])
         relative = [yaw_rotate_inverse(points - position[:, None], yaw[:, None]).flatten(1) for points in limbs]
         height = position[:, 2:3] - self.surface_height(position[:, :2]).unsqueeze(-1)
+        forces = (sensor.force.flatten(1), data.actuator_force) if self.force_rewards else ()
         physical = torch.cat((height, data.projected_gravity_b,
                               yaw_rotate_inverse(data.root_link_lin_vel_w, yaw), data.root_link_ang_vel_b,
                               data.joint_pos - data.default_joint_pos, data.joint_vel, *relative,
                               position[:, :2], yaw.unsqueeze(-1), data.joint_acc,
                               data.site_lin_vel_w[:, self.foot_ids, :2].flatten(1),
-                              (sensor.found > 0).to(position.dtype)), -1)
+                              (sensor.found > 0).to(position.dtype), *forces), -1)
         return physical
 
     def world_position(self, state: TaskState) -> Tensor:
@@ -144,7 +157,7 @@ class Go2ReferenceTaskModel:
         return self.base_height(state)[:, None] + relief
 
     def physical_features(self, state: TaskState) -> Tensor:
-        return torch.cat((state.physical[:, ROBOT_STATE], state.physical[:, AUXILIARY]), -1)
+        return torch.cat((state.physical[:, ROBOT_STATE], state.physical[:, self.auxiliary]), -1)
 
     @staticmethod
     def simulation_context(state: TaskState) -> Tensor:
@@ -243,13 +256,13 @@ class Go2ReferenceTaskModel:
         """原73维仍为增量；辅助瞬时量直接监督下一状态的绝对值。"""
         return torch.cat((next_state.physical[:, ROBOT_STATE] - state.physical[:, ROBOT_STATE],
                           pose_delta(state.physical[:, POSE], next_state.physical[:, POSE]),
-                          next_state.physical[:, AUXILIARY]), -1)
+                          next_state.physical[:, self.auxiliary]), -1)
 
     def integrate(self, state: TaskState, action: Tensor, delta: Tensor) -> Tensor:
         del action
         return torch.cat((state.physical[:, ROBOT_STATE] + delta[:, :70],
                           apply_pose_delta(state.physical[:, POSE], delta[:, POSE]),
-                          delta[:, 73:93], delta[:, CONTACT_FOUND].sigmoid()), -1)
+                          delta[:, 73:93], delta[:, CONTACT_FOUND].sigmoid(), delta[:, 97:self.physical_dim]), -1)
 
     def model_error(self, current: TaskState, predicted: TaskState, target: TaskState,
                     recorded_current: TaskState) -> Tensor:
@@ -258,7 +271,7 @@ class Go2ReferenceTaskModel:
         predicted_delta = yaw_rotate_inverse(predicted.physical[:, POSE] - current.physical[:, POSE], self.yaw(current))
         return torch.cat((predicted.physical[:, ROBOT_STATE] - target.physical[:, ROBOT_STATE],
                           predicted_delta - pose_delta(recorded_current.physical[:, POSE], target.physical[:, POSE]),
-                          predicted.physical[:, AUXILIARY] - target.physical[:, AUXILIARY]), -1)
+                          predicted.physical[:, self.auxiliary] - target.physical[:, self.auxiliary]), -1)
 
     # ---------- 奖励、失败与稀有窗口 ----------
 

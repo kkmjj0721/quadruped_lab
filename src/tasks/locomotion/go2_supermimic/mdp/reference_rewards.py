@@ -1,10 +1,11 @@
 # Copyright (c) 2026-2027 zh
-"""内容：实现表A.6、指定HIM及站立速度共十六项奖励；返回未乘控制周期的奖励率。"""
+"""内容：实现表A.6、指定HIM及站立速度共十八项奖励；返回未乘控制周期的奖励率。"""
 
 import torch
 
 from .reference_state import (
-    ANGULAR_BODY, CONTACT_FOUND, FOOT_VELOCITY_XY, GRAVITY, JOINT_ACCELERATION, JOINT_OFFSET, JOINT_VELOCITY,
+    ANGULAR_BODY, CONTACT_FOUND, FOOT_CONTACT_FORCE, FOOT_VELOCITY_XY, GRAVITY, JOINT_ACCELERATION,
+    JOINT_OFFSET, JOINT_TORQUE, JOINT_VELOCITY,
     body_vertical_velocity, normalized_gravity, tracking_velocity,
 )
 from .state_spec import PREVIOUS_ACTION, PREVIOUS_PREVIOUS_ACTION
@@ -12,7 +13,7 @@ from .gait_rewards import gait_reward_terms, posture_reward
 
 
 def reference_reward_terms(task, state, action, next_state, failure):
-    """起点命令评价终点状态；表A.6没有额外跌倒、机身高度或力矩奖励。"""
+    """起点命令评价终点状态；新增HIM项与原六项共用奖励率及控制周期。"""
     del failure
     cfg = task.cfg.reward
     physical = next_state.physical
@@ -46,6 +47,10 @@ def reference_reward_terms(task, state, action, next_state, failure):
                      * (command_magnitude > cfg.foot_slip_command_threshold),
         "joint_acc_l2": physical[:, JOINT_ACCELERATION].square().sum(-1),
     }
+    if task.force_rewards:
+        force = physical[:, FOOT_CONTACT_FORCE].reshape(-1, 4, 3)
+        terms["stumble"] = (force[..., :2].norm(dim=-1) > cfg.stumble_ratio * force[..., 2].abs()).any(dim=1).float()
+        terms["joint_torques_l2"] = physical[:, JOINT_TORQUE].square().sum(-1)
     terms.update(gait_reward_terms(task, state, next_state))
     terms["pose"] = posture_reward(task, state, next_state)
     return terms

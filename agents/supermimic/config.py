@@ -21,7 +21,7 @@ class ExecutionConfig:
 
 @dataclass
 class SuperMimicConfig:
-    """批量对齐参考 flat 运行，其余预算参考 d9eee9b3；专家结构对齐 go2_rl_gym 30e74dc。"""
+    """模型拟合批量对齐论文表A.5，其余预算参考 d9eee9b3；专家结构对齐 go2_rl_gym 30e74dc。"""
 
     replay_capacity: int = 1000
     collect_steps: int = 1
@@ -30,8 +30,8 @@ class SuperMimicConfig:
     critic_warmup_iterations: int = 500
     wm_hidden: tuple[int, ...] = (1024, 1024, 1024)
     wm_window: int = 8
-    wm_batch: int = 1024
-    wm_updates: int = 2
+    wm_batch: int = 2048
+    wm_updates: int = 10
     imag_batch: int = 4096
     horizon: int = 32
     gamma: float = 0.99

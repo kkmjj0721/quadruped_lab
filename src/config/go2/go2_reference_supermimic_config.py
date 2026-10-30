@@ -1,16 +1,10 @@
 # Copyright (c) 2026-2027 zh
-"""内容：声明指定Go2参考模型、混合专家策略、HIM命令及十六项速度奖励。"""
+"""内容：声明指定Go2参考模型、混合专家策略、HIM命令及十八项速度奖励。"""
 
 import math
 
 from agents.supermimic.config import SuperMimicConfig
 from src.config.base.base_config import BaseConfig
-
-
-# 参考 go2-supermimic d9eee9b3 robot/go2.py；膝关节传动比额外乘1.5。
-_HIP_INERTIA = 0.000111842 * 6.33 ** 2
-_KNEE_INERTIA = 0.000111842 * (6.33 * 1.5) ** 2
-_FREQUENCY = 10 * 2 * math.pi
 
 
 class Go2ReferenceCfg(BaseConfig):
@@ -31,8 +25,8 @@ class Go2ReferenceCfg(BaseConfig):
         history_size = num_obs_history
         num_observations = 47
         num_obs = num_observations * num_obs_history
-        num_privileged_obs = 234
-        num_critic_obs = 234
+        num_privileged_obs = 258
+        num_critic_obs = 258
 
     class experiment:
         """步态协议；段名沿用已验证策略快照，旧配置在读取边界恢复原开关。"""
@@ -99,24 +93,21 @@ class Go2ReferenceCfg(BaseConfig):
             speed_max = 3.0
 
     class control:
-        """参考直流电机与0～2物理步延迟，动作比例按关节类型显式设置。"""
+        """内置位置执行器对齐 legged_wbc_mjlab Go2；动作比例按关节类型显式设置。"""
 
-        stiffness = {"hip": _HIP_INERTIA * _FREQUENCY ** 2,
-                     "thigh": _HIP_INERTIA * _FREQUENCY ** 2,
-                     "calf": _KNEE_INERTIA * _FREQUENCY ** 2}
-        damping = {"hip": 4 * _HIP_INERTIA * _FREQUENCY,
-                   "thigh": 4 * _HIP_INERTIA * _FREQUENCY,
-                   "calf": 4 * _KNEE_INERTIA * _FREQUENCY}
+        stiffness = {"hip": 20.0, "thigh": 20.0, "calf": 40.0}
+        damping = {"hip": 0.5, "thigh": 0.5, "calf": 1.0}
         effort_limit = {"hip": 23.7, "thigh": 23.7, "calf": 45.43}
+        # 保留旧快照字段；内置位置执行器不使用直流电机的速度限制。
         velocity_limit = {"hip": 30.1, "thigh": 30.1, "calf": 20.07}
-        armature = {"hip": _HIP_INERTIA, "thigh": _HIP_INERTIA, "calf": _KNEE_INERTIA}
+        armature = {"hip": 0.01, "thigh": 0.01, "calf": 0.01}
         action_scales = {"hip": 0.25, "thigh": 0.5, "calf": 0.5}
         decimation = 4
         soft_joint_pos_limit_factor = 0.9
         delay_min_lag = 0
-        delay_max_lag = 2
-        delay_hold_prob = 0.0
-        delay_update_period = 1
+        delay_max_lag = 4
+        delay_hold_prob = 0.5
+        delay_update_period = 10
 
     class collision:
         foot_condim = 6
@@ -188,6 +179,7 @@ class Go2ReferenceCfg(BaseConfig):
         fall_softness_deg = 5.0
         stand_still_command_threshold = 0.1  # 命令平移模长加偏航绝对值不超过阈值时启用。
         foot_slip_command_threshold = 0.1  # 命令平移模长加偏航绝对值超过阈值时启用。
+        stumble_ratio = 5.0  # 水平接触力超过竖直接触力绝对值的该倍数时判为绊脚。
 
         class gait:
             """相位按来源足名配置；软接触只用于想象近似。"""
@@ -209,7 +201,7 @@ class Go2ReferenceCfg(BaseConfig):
         class scales:
             track_linear_velocity = 2.0
             track_angular_velocity = 2.0
-            action_rate_l2 = -0.3
+            action_rate_l2 = -0.2
             joint_pos_limits = -2.0
             torso_sideways_lean = -4.0
             body_ang_vel = -0.05
@@ -223,3 +215,5 @@ class Go2ReferenceCfg(BaseConfig):
             stand_still_joint_vel_l2 = -0.1  # 仅在站立命令下约束关节速度，权重是待训练验证的初值。
             foot_slip = -0.1
             joint_acc_l2 = -2.5e-7
+            stumble = -0.1
+            joint_torques_l2 = -2.0e-5
