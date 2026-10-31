@@ -110,7 +110,7 @@ def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="actor", dev
         result = {
             "checkpoint": str(checkpoint), "task_id": task_id, "branch": branch, "device": str(device),
             "seed": env.adapter.cfg.env.seed, "control_steps": count, "commands": commands.tolist(),
-            "command_frame": "heading_xy_world_yaw",
+            "command_frame": f"{env.adapter.cfg.reward.tracking_linear_frame}_xy_world_yaw",
             "duration_seconds": count * env.adapter.step_dt, "zero_action": branch == "zero",
             **summarize(torch.ones(num_envs, device=device, dtype=torch.bool)),
             "per_command": {name: {"command": commands[index].tolist(), **summarize(groups == index)}

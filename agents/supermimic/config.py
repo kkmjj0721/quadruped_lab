@@ -21,10 +21,11 @@ class ExecutionConfig:
 
 @dataclass
 class SuperMimicConfig:
-    """模型拟合批量对齐论文表A.5，其余预算参考 d9eee9b3；专家结构对齐 go2_rl_gym 30e74dc。"""
+    """采集调度按8bfc115，模型批量按论文表A.5，其余预算参考d9eee9b3，专家结构按30e74dc。"""
 
     replay_capacity: int = 1000
-    collect_steps: int = 1
+    # 每轮平均真实控制步；2.5对应UTD=0.4，循环累计后取整。
+    collect_steps: float = 2.5
     warmup_iterations: int = 300
     wm_rewarmup_iterations: int = 1500
     critic_warmup_iterations: int = 500
@@ -69,7 +70,7 @@ class SuperMimicConfig:
     driver_vmax: float = 3.0
 
     def __post_init__(self):
-        positive = ("replay_capacity", "collect_steps", "wm_window", "wm_batch",
+        positive = ("replay_capacity", "wm_window", "wm_batch",
                     "wm_updates", "imag_batch", "horizon", "lr_decay_iterations", "critic_epochs",
                     "critic_minibatches", "collapse_interval", "moe_expert_num", "moe_latent_dim")
         for name in positive + ("warmup_iterations", "wm_rewarmup_iterations", "critic_warmup_iterations", "actor_ramp_iterations", "archive_size"):
@@ -77,6 +78,9 @@ class SuperMimicConfig:
             minimum = 1 if name in positive else 0
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
                 raise ValueError(f"{name} must be an integer >= {minimum}")
+        if (isinstance(self.collect_steps, bool) or not isinstance(self.collect_steps, (int, float))
+                or not math.isfinite(self.collect_steps) or self.collect_steps < 1):
+            raise ValueError("collect_steps must be a finite number >= 1")
         for name in ("wm_hidden", "actor_hidden", "critic_hidden", "moe_hidden"):
             values = tuple(getattr(self, name))
             if not values or any(isinstance(x, bool) or not isinstance(x, int) or x < 1 for x in values):

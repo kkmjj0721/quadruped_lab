@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 from copy import deepcopy
+from dataclasses import replace
 
 import mujoco
 import numpy as np
@@ -18,25 +19,34 @@ import torch
 from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 
 
-def reference_generator(cfg):
-    """逐项复现go2-supermimic env/terrains.py的ROUGH_TERRAINS。"""
-    from mjlab.terrains.config import (
-        flat, pyramid_stairs, pyramid_stairs_inv, box_random_grid, random_rough,
-        hf_pyramid_slope, hf_pyramid_slope_inv,
+def reference_generator(cfg) -> TerrainGeneratorCfg:
+    """复现legged_wbc_mjlab@4eb8fcf的ri_5036_him地形生成配置。"""
+    from mjlab.terrains import BoxRandomGridTerrainCfg
+    from mjlab.terrains.config import ROUGH_TERRAINS_CFG
+
+    terrain = deepcopy(ROUGH_TERRAINS_CFG)
+    terrain.seed = cfg.seed
+    terrain.size = tuple(cfg.patch_size_m)
+    terrain.num_rows, terrain.num_cols = cfg.core_rows, cfg.num_cols
+    terrain.border_width = cfg.outer_flat_width_m
+    terrain.curriculum = True
+    for name in ("hf_pyramid_slope", "hf_pyramid_slope_inv", "wave_terrain", "random_rough"):
+        terrain.sub_terrains.pop(name)
+    terrain.sub_terrains["box_random_grid"] = BoxRandomGridTerrainCfg(
+        proportion=0.05, grid_width=0.8, grid_height_range=(0.02, 0.10),
+        platform_width=2.4, border_width=0.25, holes=False,
+        merge_similar_heights=False, height_merge_threshold=0.02, max_merge_distance=3,
     )
-    return TerrainGeneratorCfg(
-        seed=cfg.seed, size=tuple(cfg.patch_size_m), border_width=cfg.outer_flat_width_m,
-        num_rows=cfg.core_rows, num_cols=cfg.num_cols, curriculum=True, color_scheme="none",
-        sub_terrains={
-            "flat": flat(proportion=0.10),
-            "stairs": pyramid_stairs(proportion=0.20, step_height_range=(0.02, 0.10), step_width=0.4, platform_width=1.5),
-            "stairs_inv": pyramid_stairs_inv(proportion=0.20, step_height_range=(0.02, 0.10), step_width=0.4, platform_width=1.5),
-            "boxes": box_random_grid(proportion=0.15, grid_width=0.45, grid_height_range=(0.02, 0.05), platform_width=1.0),
-            "rough": random_rough(proportion=0.15, noise_range=(0.01, 0.04), noise_step=0.01),
-            "slope": hf_pyramid_slope(proportion=0.10, slope_range=(0.0, 0.3)),
-            "slope_inv": hf_pyramid_slope_inv(proportion=0.10, slope_range=(0.0, 0.3)),
-        }, add_lights=False,
-    )
+    stair_dimensions = ((0.18, 1.9), (0.20, 1.75), (0.22, 1.65), (0.25, 1.5))
+    for name in ("pyramid_stairs", "pyramid_stairs_inv"):
+        base = terrain.sub_terrains.pop(name)
+        for index, (width, border_width) in enumerate(stair_dimensions):
+            terrain.sub_terrains[f"{name}_{index}"] = replace(
+                base, step_height_range=(0.05, 0.18), step_width=width,
+                border_width=border_width, platform_width=2.499999, holes=False, proportion=0.05,
+            )
+    terrain.sub_terrains["flat"].proportion = 0.06941176470588235
+    return terrain
 
 
 def clean_look(terrain):
@@ -54,7 +64,7 @@ def clean_look(terrain):
 
 
 class TerrainMap:
-    """参考的七种地形各占一列，五行按生成器difficulty递增。"""
+    """Ri-5036 HIM的十种地形各占一列，六行按生成器difficulty递增。"""
 
     def __init__(self, cfg):
         self.cfg = deepcopy(cfg)
@@ -62,8 +72,10 @@ class TerrainMap:
         self.size = tuple(cfg.patch_size_m)
         self.generator = None if self.plane else reference_generator(cfg)
         self.family_names = ("flat",) if self.plane else tuple(self.generator.sub_terrains)
-        self.proportions = (1.,) if self.plane else tuple(term.proportion for term in self.generator.sub_terrains.values())
-        self.rows, self.cols = (1, 1) if self.plane else (cfg.core_rows, cfg.num_cols)
+        weights = (1.,) if self.plane else tuple(term.proportion for term in self.generator.sub_terrains.values())
+        total_weight = sum(weights)
+        self.proportions = tuple(weight / total_weight for weight in weights)
+        self.rows, self.cols = (1, 1) if self.plane else (self.generator.num_rows, len(self.family_names))
         self.level_counts = (self.rows,) * self.cols
         self.row_offset = self.rings = 0
         self.support_half_extent = np.asarray((self.rows, self.cols)) * self.size / 2 + cfg.outer_flat_width_m

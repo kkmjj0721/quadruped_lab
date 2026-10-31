@@ -171,6 +171,7 @@ class Go2TransitionAdapter:
         else:
             for name in ("physical", "memory", "command", "context"):
                 getattr(self._state, name)[ids] = getattr(reset_state, name)
+        self.terrain_curriculum.reset(ids, self.robot.data.root_link_pos_w[ids, :2])
         self.context_version[ids] += 1
         for values in self._episode_reward_sums.values():
             values[ids] = 0
@@ -224,6 +225,9 @@ class Go2TransitionAdapter:
             self.terrain_curriculum.control_steps = self.raw_env.common_step_counter
         self._state = final.detached_clone()
         done_ids = (terminated | truncated).nonzero().flatten()
+        # 对齐HIM：先用已执行的旧命令结算课程，再累计本步，结束行随后清零。
+        self.terrain_curriculum.update(self.raw_env, done_ids, before.command)
+        self.terrain_curriculum.advance(before.command, self.robot.data.heading_w, self.step_dt)
         episode_metrics = {}
         if done_ids.numel():
             # 对齐MjLab：提前结束也除以最大回合时长，包含结束步的贡献。

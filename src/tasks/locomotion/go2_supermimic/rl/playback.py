@@ -18,7 +18,46 @@ from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
 from ..config.train_cfg import TASK_MODES
 from .checkpoints import build_playback_policy, load_playback_source
-from .transition_adapter import make_go2_supermimic_env
+from .transition_adapter import Go2TransitionAdapter
+
+
+class _PlaybackTransitionAdapter(Go2TransitionAdapter):
+    """只在播放时重采样出生地形，沿用任务原有的原点与状态同步。"""
+
+    def _set_origins(self, ids):
+        if not self.map.plane:
+            self.terrain_curriculum.family_ids[ids] = torch.randint(self.map.cols, (ids.numel(),), device=self.device)
+            self.terrain_curriculum.levels[ids] = torch.randint(self.map.rows, (ids.numel(),), device=self.device)
+        super()._set_origins(ids)
+
+
+class _PlaybackRewardManager:
+    """向查看器提供所选环境的加权奖励率，不乘控制周期。"""
+
+    def __init__(self, adapter):
+        self.adapter = adapter
+        self.rates = {}
+
+    def reset(self, state, env_ids):
+        if not self.rates:
+            actions = torch.zeros((self.adapter.num_envs, self.adapter.task.spec.action_dim), device=self.adapter.device)
+            terms = self.adapter.task.reward_terms(state, actions, state, actions[:, 0])
+            self.rates = {name: torch.zeros_like(value) for name, value in terms.items()}
+        else:
+            ids = slice(None) if env_ids is None else env_ids
+            for values in self.rates.values():
+                values[ids] = 0
+
+    def update(self, state, actions, result):
+        # 用真实转移的终态重算同一组纯张量评分，避免读取自动重置后的状态。
+        terms = self.adapter.task.reward_terms(state, actions, result.final_state, result.terminated.float())
+        self.rates = {name: getattr(self.adapter.cfg.reward.scales, name) * value for name, value in terms.items()}
+
+    def get_active_iterable_terms(self, env_idx):
+        return [(name, [values[env_idx].item()]) for name, values in self.rates.items()]
+
+    def get_visualizable_terms(self):
+        return []
 
 
 class _PlaybackCommandManager(NullCommandManager):
@@ -82,6 +121,7 @@ class SuperMimicPlayEnv:
     def __init__(self, adapter):
         self.adapter = adapter
         self.command_manager = _PlaybackCommandManager(adapter)
+        self.reward_manager = _PlaybackRewardManager(adapter)
         self._observation = None
         self._history = None
 
@@ -97,6 +137,8 @@ class SuperMimicPlayEnv:
     def reset(self, *, env_ids=None):
         self._update_commands()
         state = self.adapter.reset(env_ids=env_ids)
+        self.reward_manager.reset(state, env_ids)
+        self.cfg.viewer.reward_bar_max_terms = len(self.reward_manager.rates)
         frame = self.adapter.task.observe(state, noisy=False)
         length = self.adapter.task.spec.history_length
         if env_ids is None or self._history is None:
@@ -123,7 +165,9 @@ class SuperMimicPlayEnv:
     @torch.no_grad()
     def step(self, actions):
         self._update_commands()
+        before = self.adapter.get_state()
         result = self.adapter.step(actions)
+        self.reward_manager.update(before, actions, result)
         frame = self.adapter.task.observe(result.next_state, noisy=False)
         history = append_history(self._history, frame)
         done = result.terminated | result.truncated
@@ -170,7 +214,7 @@ def make_playback(task_id, *, checkpoint_file=None, agent="trained", num_envs=No
     cfg.terrain.mode = TASK_MODES[task_id]
     cfg.env.num_envs = num_envs if num_envs is not None else 1
     torch.manual_seed(cfg.env.seed)
-    adapter = make_go2_supermimic_env(
+    adapter = _PlaybackTransitionAdapter(
         cfg, device=device, play=True, render_mode=render_mode, video_height=video_height,
         video_width=video_width, no_terminations=no_terminations,
     )

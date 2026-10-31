@@ -50,20 +50,38 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
     if (cfg.env.num_observations, cfg.env.num_obs) != (observation_dim, observation_dim * cfg.env.num_obs_history):
         raise ValueError("The Go2 observation dimensions must match the actor phase flag")
     critic_dimensions = (cfg.env.num_critic_obs, cfg.env.num_privileged_obs)
-    if critic_dimensions not in ((234, 234), (258, 258)):
-        raise ValueError("The Go2 state layout requires 258 critic observations or the legacy 234 layout")
+    if critic_dimensions not in ((234, 234), (258, 258), (259, 259), (262, 262)):
+        raise ValueError("The Go2 state layout requires 262 critic observations or the legacy 234/258/259 layouts")
+    if cfg.reward.tracking_linear_frame not in ("body", "heading"):
+        raise ValueError("Linear velocity tracking frame must be body or heading")
+    if cfg.reward.body_ang_vel_frame not in ("body", "heading"):
+        raise ValueError("Body angular velocity penalty frame must be body or heading")
+    for name in ("angular_momentum", "hip_pos", "soft_landing"):
+        value = getattr(cfg.reward.scales, name)
+        if not math.isfinite(value) or value > 0:
+            raise ValueError(f"Reward weight must be finite and nonpositive: {name}")
+        if critic_dimensions != (262, 262) and value != 0:
+            raise ValueError("The new HIM rewards require a 262-observation task configuration")
     for name in ("stumble", "joint_torques_l2"):
         value = getattr(cfg.reward.scales, name)
         if not math.isfinite(value) or value > 0:
             raise ValueError(f"Reward weight must be finite and nonpositive: {name}")
         if critic_dimensions == (234, 234) and value != 0:
-            raise ValueError("Force rewards require the current 258-observation task configuration")
+            raise ValueError("Force rewards require a 258/259/262-observation task configuration")
+    collision_weight = cfg.reward.scales.leg_collision
+    if not math.isfinite(collision_weight) or collision_weight > 0:
+        raise ValueError("Leg collision reward weight must be finite and nonpositive")
+    if critic_dimensions not in ((259, 259), (262, 262)) and collision_weight != 0:
+        raise ValueError("Leg collision reward requires a 259/262-observation task configuration")
+    if not math.isfinite(cfg.reward.leg_collision_force_threshold) or cfg.reward.leg_collision_force_threshold <= 0:
+        raise ValueError("Leg collision force threshold must be positive and finite")
     if not math.isfinite(cfg.reward.stumble_ratio) or cfg.reward.stumble_ratio <= 0:
         raise ValueError("Stumble force ratio must be positive and finite")
     standing_velocity_weight = cfg.reward.scales.stand_still_joint_vel_l2
     if not math.isfinite(standing_velocity_weight) or standing_velocity_weight > 0:
         raise ValueError("Standing joint velocity weight must be finite and nonpositive")
-    for name in ("stand_still_command_threshold", "foot_slip_command_threshold"):
+    for name in ("stand_still_command_threshold", "foot_slip_command_threshold",
+                 "hip_pos_command_threshold", "soft_landing_command_threshold"):
         value = getattr(cfg.reward, name)
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"Reward command threshold must be finite and nonnegative: {name}")
@@ -100,15 +118,25 @@ def make_go2_supermimic_env_cfg(
     # ---------- 场景 ----------
 
     feet = tuple(f"{leg}_foot_collision" for leg in FOOT_NAMES)
+    sensors = (ContactSensorCfg(
+        name="feet_ground_contact",
+        primary=ContactMatch(mode="geom", pattern=feet, entity="robot"),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found", "force"), reduce="netforce", num_slots=1, track_air_time=True,
+    ),)
+    if cfg.env.num_critic_obs in (259, 262):
+        sensors += (ContactSensorCfg(
+            name="leg_ground_contact",
+            primary=ContactMatch(
+                mode="geom", pattern=r"^(FR|FL|RR|RL)_(hip|thigh|calf).*_collision\d*$", entity="robot",
+            ),
+            secondary=ContactMatch(mode="body", pattern="terrain"),
+            fields=("found", "force"), reduce="none", num_slots=1, history_length=1,
+        ),)
     scene = SceneCfg(
         entities={"robot": get_reference_go2_robot_cfg(cfg)},
         terrain=terrain_map.entity_cfg(),
-        sensors=(ContactSensorCfg(
-            name="feet_ground_contact",
-            primary=ContactMatch(mode="geom", pattern=feet, entity="robot"),
-            secondary=ContactMatch(mode="body", pattern="terrain"),
-            fields=("found", "force"), reduce="netforce", num_slots=1, track_air_time=True,
-        ),),
+        sensors=sensors,
         num_envs=cfg.env.num_envs,
         extent=cfg.env.scene_extent,
     )
@@ -188,8 +216,8 @@ def make_go2_supermimic_env_cfg(
             iterations=cfg.sim.iterations,
             ls_iterations=cfg.sim.ls_iterations,
             ccd_iterations=cfg.sim.ccd_iterations,
-            impratio=10,
-            cone="elliptic",
+            impratio=1.0,
+            cone="pyramidal",
         ),
     )
     viewer = ViewerConfig(

@@ -93,8 +93,12 @@ def read_settings(path: Path) -> tuple[dict, bool]:
                 reward.pop("clearance", None)
         if complete_snapshot:
             # 完整旧快照缺失的新增奖励必须显式保留关闭状态，局部JSON沿用新默认。
-            for name in ("stand_still_joint_vel_l2", "stumble", "joint_torques_l2"):
+            for name in ("stand_still_joint_vel_l2", "stumble", "joint_torques_l2", "leg_collision",
+                         "angular_momentum", "hip_pos", "soft_landing"):
                 scales.setdefault(name, 0.0)
+            # 旧速度任务使用heading平移；完整新快照已有显式坐标定义。
+            reward.setdefault("tracking_linear_frame", "heading")
+            reward.setdefault("body_ang_vel_frame", "heading")
     return settings, wrapped
 
 
@@ -125,4 +129,9 @@ def configuration_for_settings(settings: dict | None = None):
     algorithm = settings.get("algorithm", "moe_history")
     if algorithm != "moe_history":
         raise ValueError(f"Unsupported SuperMimic algorithm: {algorithm}")
-    return Go2ReferenceCfg()
+    cfg = Go2ReferenceCfg()
+    reward = settings.get("reward")
+    if isinstance(reward, dict) and isinstance(reward.get("scales"), dict) and "torso_sideways_lean" in reward["scales"]:
+        # 仅显式历史配置保留已删除奖励的声明，随后仍由统一覆盖入口校验权重。
+        cfg.reward.scales.torso_sideways_lean = 0.0
+    return cfg

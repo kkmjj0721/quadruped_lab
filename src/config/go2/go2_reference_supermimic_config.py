@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：声明指定Go2参考模型、混合专家策略、HIM命令及十八项速度奖励。"""
+"""内容：声明指定Go2参考模型、混合专家策略、HIM命令及二十一项速度奖励。"""
 
 import math
 
@@ -25,8 +25,8 @@ class Go2ReferenceCfg(BaseConfig):
         history_size = num_obs_history
         num_observations = 47
         num_obs = num_observations * num_obs_history
-        num_privileged_obs = 258
-        num_critic_obs = 258
+        num_privileged_obs = 262
+        num_critic_obs = 262
 
     class experiment:
         """步态协议；段名沿用已验证策略快照，旧配置在读取边界恢复原开关。"""
@@ -40,7 +40,7 @@ class Go2ReferenceCfg(BaseConfig):
         nconmax = None
         njmax = 300
         broadphase = "nxn"
-        solver = "newton"
+        solver = "cg"
         timestep = 0.005
         iterations = 10
         ls_iterations = 20
@@ -110,7 +110,7 @@ class Go2ReferenceCfg(BaseConfig):
         delay_update_period = 10
 
     class collision:
-        foot_condim = 6
+        foot_condim = 3
         body_condim = 1
         foot_priority = 1
         foot_friction = (1.0, 5e-3, 5e-4)
@@ -126,17 +126,17 @@ class Go2ReferenceCfg(BaseConfig):
         }
 
     class terrain:
-        """指定Go2参考的5×7地形及12000轮按进度开放课程。"""
+        """Ri-5036 HIM地形；难度采用Go2 HIM行走表现课程。"""
 
         mode = "flat"
-        seed = 7
-        patch_size_m = (12.0, 12.0)
-        core_rows = 5
-        num_cols = 7
-        outer_flat_width_m = 10.0
+        seed = None
+        patch_size_m = (8.0, 8.0)
+        core_rows = 6
+        num_cols = 20  # 沿用参考配置；MjLab课程模式按十种子地形实际生成十列。
+        outer_flat_width_m = 20.0
         max_init_level = 0
         curriculum = True
-        curriculum_iterations = 12000
+        curriculum_iterations = 12000  # 保留旧配置字段；行走表现课程不使用该值。
         field_resolution_m = 0.02
         field_half_m = 6.5
         field_cache_dir = "logs/heightfields"
@@ -154,7 +154,7 @@ class Go2ReferenceCfg(BaseConfig):
         com_range = {"x": (-0.025, 0.025), "y": (-0.025, 0.025), "z": (-0.03, 0.03)}
 
     class commands:
-        """HIM采样及heading反馈；既有奖励仍评价heading平移与world yaw。"""
+        """HIM采样及heading反馈；新奖励评价body平移与world yaw。"""
 
         reference_steps_per_iteration = 1
         initial_ranges = ((-1.0, 1.0), (-1.0, 1.0), (-2.0, 2.0))
@@ -171,15 +171,20 @@ class Go2ReferenceCfg(BaseConfig):
         rel_forward_envs = 0.05
 
     class reward:
-        """保留表A.6六项并添加指定HIM奖励；各项先返回奖励率。"""
+        """机体系平移及指定HIM奖励；各项先返回奖励率。"""
 
-        tracking_linear_variance = 0.5 ** 2
-        tracking_angular_variance = 0.5
+        tracking_linear_frame = "body"
+        body_ang_vel_frame = "body"  # 新训练按HIM约束机体系xy角速度；旧完整快照保留heading。
+        tracking_linear_variance = 0.25
+        tracking_angular_variance = 0.25
         fall_angle = math.radians(70)
         fall_softness_deg = 5.0
         stand_still_command_threshold = 0.1  # 命令平移模长加偏航绝对值不超过阈值时启用。
         foot_slip_command_threshold = 0.1  # 命令平移模长加偏航绝对值超过阈值时启用。
         stumble_ratio = 5.0  # 水平接触力超过竖直接触力绝对值的该倍数时判为绊脚。
+        leg_collision_force_threshold = 1.0  # 任一腿部几何体对地接触力模严格超过该值时惩罚，N。
+        hip_pos_command_threshold = 0.1  # 侧移及转向命令绝对值均不超过阈值时约束髋角。
+        soft_landing_command_threshold = 0.1  # 命令平移模长加偏航绝对值超过阈值时约束落地力。
 
         class gait:
             """相位按来源足名配置；软接触只用于想象近似。"""
@@ -201,9 +206,8 @@ class Go2ReferenceCfg(BaseConfig):
         class scales:
             track_linear_velocity = 2.0
             track_angular_velocity = 2.0
-            action_rate_l2 = -0.2
-            joint_pos_limits = -2.0
-            torso_sideways_lean = -4.0
+            action_rate_l2 = -0.1
+            joint_pos_limits = -10.0
             body_ang_vel = -0.05
             foot_gait = 0.5
             feet_air_time = 0.2
@@ -212,8 +216,12 @@ class Go2ReferenceCfg(BaseConfig):
             body_orientation_l2 = -0.2
             smoothness = -0.01
             stand_still = -2.0
-            stand_still_joint_vel_l2 = -0.1  # 仅在站立命令下约束关节速度，权重是待训练验证的初值。
+            stand_still_joint_vel_l2 = -0.5  # 仅在站立命令下约束关节速度，权重是待训练验证的初值。
             foot_slip = -0.1
             joint_acc_l2 = -2.5e-7
             stumble = -0.1
             joint_torques_l2 = -2.0e-5
+            leg_collision = -1.0
+            angular_momentum = -0.025
+            hip_pos = -1.0
+            soft_landing = -2.0e-3

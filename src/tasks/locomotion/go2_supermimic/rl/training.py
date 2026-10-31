@@ -151,6 +151,7 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     print(f"[INFO] Control updates enabled: {cfg.runner.enable_control_updates}", flush=True)
     execution = ExecutionConfig(imag_microbatch=args.imag_microbatch, critic_microbatch=args.critic_microbatch)
     print(f"[INFO] SuperMimic {cfg.algorithm} training: envs={cfg.env.num_envs}, "
+          f"collect_avg={cfg.algo.collect_steps:g}, utd={1.0 / cfg.algo.collect_steps:g}, "
           f"wm_batch={cfg.algo.wm_batch}, imag_batch={cfg.algo.imag_batch}, "
           f"replay={cfg.algo.replay_capacity}, compile={cfg.algo.compile_imagination}, "
           f"imag_microbatch={execution.imag_microbatch}, critic_microbatch={execution.critic_microbatch}", flush=True)

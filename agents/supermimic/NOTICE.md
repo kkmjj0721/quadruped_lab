@@ -14,7 +14,8 @@
 - 状态字典键名与 `go2_rl_gym` 的 `StudentMoEEncoder` 完全一致，同权重前向逐位相等；`MoeActor.load_pretrained` 可按预训练导出名的展平命名热启动，已对 `go2_moe_cts_137k_0.6739.pt` 验证动作差 ≤1e-6。
 - 核心目标仍对应论文 §3、公式(1)～(3)：8 步自回归模型监督，32 步冻结模型权重的 BPTT，软存活与末端价值，固定 lambda-return，无价值目标网络。速度奖励与机器人差异由任务设计单独记录。
 - 真实回放以半精度保存完整历史，想象起点均匀抽取全部已保存时刻；模型窗口目标读取下一回放槽，done 当步及其后均无效。终止时下一槽的 reset 后状态仍参与参考的稀有事件判定；仿真接口保留的 reset 前 `final_state` 不作为该窗口目标。
-- 预填与训练迭代分开：循环采到回放长度大于 `wm_window+1`，默认8步窗口预填10步；每一训练轮另采 `collect_steps`。模型归一化统计排除 done 当步，OU过程按参考为全部环境推进。
+- 真实采集调度按用户指定的 [zita-ch/supermimic_vibed@8bfc115](https://github.com/zita-ch/supermimic_vibed/blob/8bfc1158bd968f729fcc65d5e897a05b05ea3d36/supermimic/train.py#L300-L322)：`collect_steps` 为每轮平均控制步数，默认2.5对应UTD=0.4，累加后取整按2／3交替；余量跨多次 `learn()` 保留，重置采集或恢复时重新初始化。UTD按整轮训练更新计数，10批模型拟合另计。这里只迁入其调度，不迁入G1任务或其他参数，也不视为作者官方实现。
+- 预填与训练迭代分开：以 `int(collect_steps)` 为整数批次，循环采到回放长度大于 `wm_window+1`，默认8步窗口仍预填10步，不消耗训练累加器。旧整数快照保留原预算。模型归一化统计排除done当步，OU过程按参考为全部环境推进。
 - lambda-return 保留参考 `surv[t+1]/clamp(surv[t],1e-6)` 的低存活数值语义；critic 每个 epoch 按 `n//critic_minibatches` 分片，余数按来源丢弃。非有限梯度跳过对应优化器更新；`nonfinite_steps` 依来源统计模型及 actor，critic 另用 `critic_skipped` 记录。非有限日志值省略并报告跳过计数，不改变终端版式。
 - 护栏每50轮判定一次，按来源对发生过任何reset的step求失败绝对数量均值，包含只有超时而跌倒数为0的reset step；没有reset的step不进入分母。依据 MjLab1.6 `manager_based_rl_env.py:434,471,614` 和 `termination_manager.py:95`，每step清空`extras["log"]`，仅reset路径输出终止统计。该值以 `guard/falls_per_reset_step` 记录。
 - `load(path, continue_run=False, reset_critic=False)` 默认热启动并从第0轮重新计时；继续训练保留迭代号。模型形状变化时保留新构造的模型，策略更新推迟至至少1500轮；critic形状变化或显式重置时，actor冻结至策略更新起点之后500轮。只恢复已载入网络的同形状优化器，不恢复回放、仿真、RNG、护栏学习率缩放或旧预热排期。

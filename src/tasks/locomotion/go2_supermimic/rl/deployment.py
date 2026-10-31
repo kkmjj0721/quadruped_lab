@@ -27,6 +27,7 @@ def deployment_metadata(cfg, *, spec_hash: str, algorithm) -> dict:
     phase_enabled = cfg.experiment.actor_phase
     phase_layout = [{"name": "gait_phase_sin_cos", "width": 2}] if phase_enabled else []
     width = 47 if phase_enabled else 45
+    command_frame = f"{cfg.reward.tracking_linear_frame}_xy_world_yaw"
     return {
         "spec_hash": spec_hash, "algorithm": "moe_history_encoder",
         "input_shape": [None, width * cfg.env.num_obs_history],
@@ -37,7 +38,7 @@ def deployment_metadata(cfg, *, spec_hash: str, algorithm) -> dict:
             {"name": "joint_position_offset_with_encoder_bias", "width": 12},
             {"name": "joint_velocity", "width": 12},
             {"name": "previous_unscaled_action", "width": 12},
-            {"name": "velocity_command_heading_xy_world_yaw", "width": 3},
+            {"name": f"velocity_command_{command_frame}", "width": 3},
         ] + phase_layout,
         "joint_names": list(JOINT_NAMES), "action_joint_names": list(JOINT_NAMES),
         "default_joint_positions": [float(cfg.init_state.default_joint[name]) for name in JOINT_NAMES],
@@ -46,7 +47,9 @@ def deployment_metadata(cfg, *, spec_hash: str, algorithm) -> dict:
         "joint_target_coordinate": "encoder",
         "simulation_physical_target_formula": "default_joint_positions + actions * action_scales - encoder_bias",
         "control_dt_seconds": float(cfg.sim.timestep * cfg.control.decimation),
-        "observation_semantics": "blind_proprioception_and_heading_velocity_command",
+        "command_frame": command_frame,
+        "observation_semantics": ("blind_proprioception_and_heading_velocity_command" if cfg.reward.tracking_linear_frame == "heading"
+                                  else "blind_proprioception_and_body_xy_world_yaw_command"),
         "history_encoder": {"type": "mixture_of_experts", "input": "five_frame_blind_history",
                             "latent_dim": int(algorithm.moe_latent_dim),
                             "experts": int(algorithm.moe_expert_num),

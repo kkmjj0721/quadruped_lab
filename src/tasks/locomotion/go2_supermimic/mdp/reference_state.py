@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：定义Go2原73维状态、48维瞬时辅助量及旧航向系平面位姿增量。"""
+"""内容：定义Go2原73维状态、52维瞬时辅助量及旧航向系平面位姿增量。"""
 
 import torch
 from torch import Tensor
@@ -21,8 +21,12 @@ FOOT_VELOCITY_XY = slice(85, 93)
 CONTACT_FOUND = slice(93, 97)
 FOOT_CONTACT_FORCE = slice(97, 109)
 JOINT_TORQUE = slice(109, 121)
-AUXILIARY = slice(73, 121)
-PHYSICAL_DIM = 121
+LEG_CONTACT_FORCE = slice(121, 122)
+ANGULAR_MOMENTUM = slice(122, 125)  # heading系角动量；平方和与来源world系严格等价。
+AUXILIARY = slice(73, 125)
+PHYSICAL_DIM = 125
+LEG_PHYSICAL_DIM = 122
+FORCE_PHYSICAL_DIM = 121
 LEGACY_PHYSICAL_DIM = 97
 CONTEXT_COM = slice(13, 16)
 
@@ -60,6 +64,18 @@ def tracking_velocity(physical: Tensor) -> Tensor:
     """论文A.6命令坐标：heading平面速度和世界角速度z。"""
     world_yaw_rate = -(normalized_gravity(physical) * physical[..., ANGULAR_BODY]).sum(-1, keepdim=True)
     return torch.cat((physical[..., VELOCITY_HEADING][..., :2], world_yaw_rate), -1)
+
+
+def body_planar_velocity(physical: Tensor) -> Tensor:
+    """由heading速度及单位重力恢复body-xy；保留机身倾斜引起的速度投影。"""
+    gravity = normalized_gravity(physical)
+    gx, gy, gz = gravity.unbind(-1)
+    cosine_pitch = gravity[..., 1:].norm(dim=-1).clamp_min(1e-6)
+    velocity = physical[..., VELOCITY_HEADING]
+    body_x = cosine_pitch * velocity[..., 0] - gx * velocity[..., 2]
+    body_y = (-gx * gy / cosine_pitch * velocity[..., 0]
+              - gz / cosine_pitch * velocity[..., 1] - gy * velocity[..., 2])
+    return torch.stack((body_x, body_y), -1)
 
 
 def body_vertical_velocity(physical: Tensor) -> Tensor:

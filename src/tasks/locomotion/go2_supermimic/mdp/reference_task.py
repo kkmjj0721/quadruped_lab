@@ -15,9 +15,9 @@ from .reference_rewards import reference_reward_terms
 from .commands import advance_commands, heading_command, sample_commands
 from .gait_rewards import gait_phase
 from .reference_state import (
-    ANGULAR_BODY, AUXILIARY, CONTACT_FOUND, CONTEXT_COM, FEET, GRAVITY, HEIGHT, JOINT_OFFSET,
-    JOINT_VELOCITY, LEGACY_PHYSICAL_DIM, PHYSICAL_DIM, POSE,
-    ROBOT_STATE, VELOCITY_HEADING, apply_pose_delta, pose_delta, tracking_velocity, yaw_rotate_inverse,
+    ANGULAR_BODY, AUXILIARY, CONTACT_FOUND, CONTEXT_COM, FEET, FORCE_PHYSICAL_DIM, GRAVITY, HEIGHT, JOINT_OFFSET,
+    JOINT_VELOCITY, LEGACY_PHYSICAL_DIM, LEG_PHYSICAL_DIM, PHYSICAL_DIM, POSE,
+    ROBOT_STATE, VELOCITY_HEADING, apply_pose_delta, body_planar_velocity, pose_delta, tracking_velocity, yaw_rotate_inverse,
 )
 from .state_spec import (
     COMMAND_TIMER, CONTEXT_ENCODER_BIAS,
@@ -29,7 +29,7 @@ from .state_spec import (
 class Go2ReferenceTaskModel:
     """独立实现参考Go2的状态、命令、观测、奖励与回放事件接口。"""
 
-    model_input_dim = 235
+    model_input_dim = 239
     observation_term_dims = (3, 3, 12, 12, 12, 3)
 
     def __init__(self, cfg, default_joint_pos: Tensor, joint_limits: Tensor, surface, device="cpu"):
@@ -37,8 +37,13 @@ class Go2ReferenceTaskModel:
         self.device = torch.device(device)
         self.surface = surface
         self.dt = cfg.sim.timestep * cfg.control.decimation
-        self.force_rewards = cfg.env.num_critic_obs == 258
-        self.physical_dim = PHYSICAL_DIM if self.force_rewards else LEGACY_PHYSICAL_DIM
+        self.him_rewards = cfg.env.num_critic_obs == 262
+        self.legacy_sideways_lean = hasattr(cfg.reward.scales, "torso_sideways_lean")
+        self.body_ang_vel_frame = cfg.reward.body_ang_vel_frame
+        self.leg_collision = cfg.env.num_critic_obs in (259, 262)
+        self.force_rewards = cfg.env.num_critic_obs in (258, 259, 262)
+        self.physical_dim = (PHYSICAL_DIM if self.him_rewards else LEG_PHYSICAL_DIM if self.leg_collision else
+                             FORCE_PHYSICAL_DIM if self.force_rewards else LEGACY_PHYSICAL_DIM)
         self.auxiliary = slice(AUXILIARY.start, self.physical_dim)
         self.model_input_dim = self.physical_dim + 114
         self.observation_term_dims = type(self).observation_term_dims + ((2,) if cfg.experiment.actor_phase else ())
@@ -70,10 +75,12 @@ class Go2ReferenceTaskModel:
         payload = {"task": self._semantic_config(), "geometry": surface.geometry_hash,
                    "default_joint_pos": self.default_joint_pos.cpu().tolist(),
                    "joint_limits": self.joint_limits.cpu().tolist(),
-                   "layout": ("go2_reference_state70_pose3_motion_force_aux48_v5" if self.force_rewards else
+                   "layout": ("go2_reference_state70_pose3_motion_force_leg_momentum_aux52_v7" if self.him_rewards else
+                              "go2_reference_state70_pose3_motion_force_leg_aux49_v6" if self.leg_collision else
+                              "go2_reference_state70_pose3_motion_force_aux48_v5" if self.force_rewards else
                               "go2_reference_state70_pose3_motion_aux24_v4")}
         self.semantic_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
-        version = "v5" if self.force_rewards else "v4"
+        version = "v7" if self.him_rewards else "v6" if self.leg_collision else "v5" if self.force_rewards else "v4"
         self.spec = AlgorithmSpec(self.physical_dim, self.physical_dim, 12, sum(self.observation_term_dims),
                                   cfg.env.num_critic_obs, 26, MEMORY_DIM, 3,
                                   f"go2_reference_velocity_{version}:" + self.semantic_hash,
@@ -86,12 +93,27 @@ class Go2ReferenceTaskModel:
         两段并存或都不存在时无法判断意图，直接报错而非静默算出另一个指纹。
         """
         config = self.cfg.to_dict()
+        # 旧完整快照未声明角速度坐标，恢复heading后不改变原语义指纹。
+        if config["reward"]["body_ang_vel_frame"] == "heading":
+            del config["reward"]["body_ang_vel_frame"]
+        # 完整旧快照关闭本轮三项并恢复heading定义；新增参数不改变其既有指纹。
+        if not self.him_rewards:
+            for name in ("angular_momentum", "hip_pos", "soft_landing"):
+                del config["reward"]["scales"][name]
+            for name in ("hip_pos_command_threshold", "soft_landing_command_threshold"):
+                del config["reward"][name]
+            if config["reward"]["tracking_linear_frame"] == "heading":
+                del config["reward"]["tracking_linear_frame"]
         # 旧45维任务关闭两项时保留既有指纹，新协议开关完整进入语义指纹。
         if config["experiment"] == {"contact_source": "height", "actor_phase": False}:
             del config["experiment"]
         # 禁用新增站立速度项时保留已有十五项v4快照的指纹，非零权重标识新任务语义。
         if config["reward"]["scales"]["stand_still_joint_vel_l2"] == 0.0:
             del config["reward"]["scales"]["stand_still_joint_vel_l2"]
+        # 历史v4／v5布局不含腿部接触力，读取边界关闭新奖励后保留原指纹。
+        if not self.leg_collision:
+            del config["reward"]["scales"]["leg_collision"]
+            del config["reward"]["leg_collision_force_threshold"]
         # 完整旧快照由读取边界补零，保留97维协议及其原始语义指纹。
         if not self.force_rewards:
             del config["reward"]["scales"]["stumble"]
@@ -118,7 +140,7 @@ class Go2ReferenceTaskModel:
         self.foot_ids, _ = robot.find_sites(FOOT_NAMES, preserve_order=True)
 
     def read_physical(self, env) -> Tensor:
-        """读取最后forward后的瞬时量；新协议另含世界接触力与实际执行器力矩。"""
+        """读取最后forward后的瞬时量；腿部历史力取最大模以保留来源any语义。"""
         data = env.scene["robot"].data
         sensor = env.scene["feet_ground_contact"].data
         position, yaw = data.root_link_pos_w, data.heading_w
@@ -127,12 +149,18 @@ class Go2ReferenceTaskModel:
         relative = [yaw_rotate_inverse(points - position[:, None], yaw[:, None]).flatten(1) for points in limbs]
         height = position[:, 2:3] - self.surface_height(position[:, :2]).unsqueeze(-1)
         forces = (sensor.force.flatten(1), data.actuator_force) if self.force_rewards else ()
+        leg_force = ()
+        if self.leg_collision:
+            history = env.scene["leg_ground_contact"].data.force_history
+            leg_force = (history.norm(dim=-1).amax(dim=(1, 2)).unsqueeze(-1),)
+        # heading旋转保持角动量平方和，避免模型在缺少绝对yaw输入时预测世界向量。
+        momentum = (yaw_rotate_inverse(env.scene["robot/root_angmom"].data, yaw),) if self.him_rewards else ()
         physical = torch.cat((height, data.projected_gravity_b,
                               yaw_rotate_inverse(data.root_link_lin_vel_w, yaw), data.root_link_ang_vel_b,
                               data.joint_pos - data.default_joint_pos, data.joint_vel, *relative,
                               position[:, :2], yaw.unsqueeze(-1), data.joint_acc,
                               data.site_lin_vel_w[:, self.foot_ids, :2].flatten(1),
-                              (sensor.found > 0).to(position.dtype), *forces), -1)
+                              (sensor.found > 0).to(position.dtype), *forces, *leg_force, *momentum), -1)
         return physical
 
     def world_position(self, state: TaskState) -> Tensor:
@@ -146,7 +174,10 @@ class Go2ReferenceTaskModel:
         return state.physical[:, 72]
 
     def tracking_velocity(self, state: TaskState) -> Tensor:
-        return tracking_velocity(state.physical)
+        velocity = tracking_velocity(state.physical)
+        if self.cfg.reward.tracking_linear_frame == "body":
+            return torch.cat((body_planar_velocity(state.physical), velocity[:, 2:]), -1)
+        return velocity
 
     def terrain_scan(self, state: TaskState) -> Tensor:
         position, yaw = self.world_position(state), self.yaw(state)

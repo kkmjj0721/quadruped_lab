@@ -66,6 +66,7 @@ class SuperMimicRunner:
         self.archive = WindowArchive(cfg.archive_size)
         self.control_enabled = bool(control_enabled)
         self.iteration = self.real_steps = self.imagined_steps = 0
+        self._collect_step_accumulator = 0.0
         self.current = self.history = None
         self.ou_noise = torch.zeros(env.num_envs, self.spec.action_dim, device=self.device)
         self.exploration_count = int(env.num_envs * cfg.explore_frac)
@@ -121,6 +122,7 @@ class SuperMimicRunner:
     @torch.no_grad()
     def reset_collection(self):
         self.current = self.env.reset()
+        self._collect_step_accumulator = 0.0
         frame = self.task.observe(self.current, noisy=True)
         self.history = frame[:, None].repeat(1, self.spec.history_length, 1)
         self.ou_noise.zero_()
@@ -268,11 +270,11 @@ class SuperMimicRunner:
             raise ValueError("Training iterations must be a positive integer")
         output = []
         target = max(self.target_iteration, self.iteration + iterations)
-        # 预填独立于训练迭代；默认8步窗口先收集10步，每轮再采collect_steps。
+        # 预填使用整数批次且不消耗训练累加器；默认8步窗口仍先采10步。
         self._synchronize()
         prefill_started = time.perf_counter()
         while self.replay.size <= self.config.wm_window + 1:
-            metrics = self.collect(self.config.collect_steps)
+            metrics = self.collect(int(self.config.collect_steps))
             self._guard_falls += float(metrics["failures"])
             self._guard_reset_steps += metrics["reset_steps"]
         self._synchronize()
@@ -286,7 +288,12 @@ class SuperMimicRunner:
             previous_model_updates = self.learner.model_updates
             previous_actor_updates = self.learner.actor_updates
             previous_critic_updates = self.learner.critic_updates
-            metrics = self.collect(self.config.collect_steps)
+            # 累加器跨learn调用保留余量，默认依次采2、3步。
+            self._collect_step_accumulator += self.config.collect_steps
+            collect_steps = int(self._collect_step_accumulator)
+            self._collect_step_accumulator -= collect_steps
+            metrics = self.collect(collect_steps)
+            metrics["collection/control_steps"] = collect_steps
             self._synchronize()
             collection_time = time.perf_counter() - started
             model_time = control_time = 0.0
@@ -421,6 +428,8 @@ class SuperMimicRunner:
                 raise ValueError("Invalid checkpoint training counters")
             setattr(self, name, value)
         self.current = self.history = None
+        # 与指定参考一致，恢复进程重新开始采集相位，物理与回放同时重置。
+        self._collect_step_accumulator = 0.0
         self.replay.clear()
         self.archive.clear()
         self.elapsed = 0.0
