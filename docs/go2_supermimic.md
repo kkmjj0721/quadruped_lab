@@ -19,6 +19,8 @@
 
 世界模型拟合预算对齐论文表A.5：每轮10批2048个8步窗口；想象批量仍采用参考仓库 `logs/supermimic/2026-10-27_17-09-24_flat/model_1000.pt` 中保存的4096条32步想象。真实采集按用户指定的 [zita-ch/supermimic_vibed@8bfc115](https://github.com/zita-ch/supermimic_vibed/blob/8bfc1158bd968f729fcc65d5e897a05b05ea3d36/supermimic/train.py#L300-L322)：`algo.collect_steps=2.5` 表示每轮平均控制步数，对应UTD=0.4；循环累加后取整，按2、3步交替，模型10批更新另计。
 
+执行方式默认使用工程消融的 `s101`：编译世界模型监督核心，并为 actor、世界模型、critic 使用 fused Adam；护栏重建及旧检查点恢复也沿用当前 fused 设置。监督核心后端使用 `algo.compile_backend`（默认 `inductor`），保留显式半精度舍入，命令采样仍按原顺序执行；想象编译继续由 `algo.compile_imagination` 控制。首次监督更新含编译开销。使用 `--wm-compile False --fused-adam False` 可关闭这两项以对照原工程基线；这些开关不改变任务参数、训练预算或检查点网络键，实际值写入 `params/agent.yaml` 的 `execution`。
+
 其余预算沿用指定Go2参考源码：4096环境、1000步/环境回放；世界模型1024³；300轮模型预热；actor动作MLP与critic均为ELU(512,256,128)。世界模型网络等设置仍与论文表A.4/A.5不同，其余参考预算按用户选择保留。训练循环外仍独立预填10步；累加器跨分段训练保留余量，重置采集或恢复时重新开始。回放直接保存完整半精度历史。旧检查点续训默认读取原 `task_config.json` 中的整数采集预算；若要按新节奏继续，显式提供含 `{"algo":{"collect_steps":2.5}}` 的 `--task-config`，并按原入口要求提供其他需要保留的任务参数。日志 `collection/control_steps` 为本轮实际步数，吞吐按真实转移差计算。
 
 `--num-envs` 只改变环境数。默认 `--imag-microbatch 4096 --critic-microbatch 32768` 覆盖整个想象批量和每个critic小批：actor每轮整批反传一次，critic按5轮×4小批反传并更新20次。显式调小这两个上限时才分段，每段仍完整反传32步，总批量和优化器更新次数不变。配置不根据显卡自动缩减。整批执行的峰值显存高于分段执行；8 GB显卡应先运行下文显式GPU检查，再按实际容量设定实验规模；短检查不证明默认4096环境的全预算能运行。修改默认值只影响新进程；续训或显式加载JSON时，其中保存的批量仍覆盖默认值。

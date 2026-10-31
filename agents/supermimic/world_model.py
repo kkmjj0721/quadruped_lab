@@ -55,6 +55,18 @@ class WorldModel(nn.Module):
         self.net = nn.Sequential(*layers)
         self.input_norm = RunningNorm(task.model_input_dim)
         self.output_norm = RunningNorm(task.spec.delta_dim)
+        self._supervised_compile_backend = None
+        self._compiled_supervised = None
+
+    def configure_supervised_compile(self, *, enabled: bool, backend: str):
+        """只编译监督物理核心；执行设置不进入模型参数或检查点。"""
+        self._supervised_compile_backend = backend if enabled else None
+        self._compiled_supervised = None
+
+    def _predict_supervised_physical(self, state, action, recorded_current):
+        inputs = self.task.supervised_model_input(state, action, recorded_current)
+        delta = self.output_norm.unnormalize(self.net(self.input_norm(inputs)))
+        return self.task.integrate(state, action, delta)
 
     @torch.no_grad()
     def update_stats(self, state: TaskState, action: Tensor, target: TaskState):
@@ -62,10 +74,20 @@ class WorldModel(nn.Module):
         self.output_norm.update(self.task.model_target(state, target))
 
     def forward(self, state: TaskState, action: Tensor, recorded_current: TaskState | None = None) -> TaskState:
-        inputs = (self.task.model_input(state, action) if recorded_current is None
-                  else self.task.supervised_model_input(state, action, recorded_current))
-        delta = self.output_norm.unnormalize(self.net(self.input_norm(inputs)))
-        physical = self.task.integrate(state, action, delta)
+        if recorded_current is not None and self._supervised_compile_backend is not None:
+            if self._compiled_supervised is None:
+                arguments = {"backend": self._supervised_compile_backend, "fullgraph": True, "dynamic": False}
+                if self._supervised_compile_backend == "inductor":
+                    # 保留监督地形relief显式half→float的舍入边界。
+                    arguments["options"] = {"emulate_precision_casts": True}
+                self._compiled_supervised = torch.compile(self._predict_supervised_physical, **arguments)
+            physical = self._compiled_supervised(state, action, recorded_current)
+        else:
+            inputs = (self.task.model_input(state, action) if recorded_current is None
+                      else self.task.supervised_model_input(state, action, recorded_current))
+            delta = self.output_norm.unnormalize(self.net(self.input_norm(inputs)))
+            physical = self.task.integrate(state, action, delta)
+        # 监督推进仍消耗原有命令采样随机数；想象前向不接入该编译核心。
         return self.task.advance(state, action, physical)
 
     def loss(self, window) -> Tensor:

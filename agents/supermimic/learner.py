@@ -45,9 +45,12 @@ class Learner:
     def __init__(self, task, actor, model, critic, config, execution=None):
         self.actor, self.model, self.critic, self.config = actor, model, critic, config
         self.execution = ExecutionConfig(**asdict(execution if execution is not None else ExecutionConfig()))
-        self.actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.learning_rate, betas=(0.9, 0.95))
-        self.model_optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
-        self.critic_optimizer = torch.optim.Adam(critic.parameters(), lr=config.learning_rate)
+        # 关闭时沿用原默认自动选择foreach；显式False会改为单张量更新。
+        fused = True if self.execution.fused_adam else None
+        self.actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.learning_rate, betas=(0.9, 0.95),
+                                                fused=fused)
+        self.model_optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, fused=fused)
+        self.critic_optimizer = torch.optim.Adam(critic.parameters(), lr=config.learning_rate, fused=fused)
         self.imagination = Imagination(task, actor, model, critic, config)
         self.actor_updates = 0
         self.model_updates = 0
@@ -171,8 +174,15 @@ class Learner:
                 "model_updates": self.model_updates, "critic_updates": self.critic_updates,
                 "nonfinite_steps": self.nonfinite_steps}
 
+    def load_optimizer_state_dict(self, name, data):
+        """沿用当前融合执行选项，加载原步数、动量和其余优化器参数。"""
+        # 必须在加载前覆盖：PyTorch据此把fused Adam的step张量放到参数设备。
+        fused = True if self.execution.fused_adam else None
+        state = {**data, "param_groups": [{**group, "fused": fused} for group in data["param_groups"]]}
+        getattr(self, name + "_optimizer").load_state_dict(state)
+
     def load_state_dict(self, data):
         for name in ("actor", "model", "critic"):
-            getattr(self, name + "_optimizer").load_state_dict(data[name])
+            self.load_optimizer_state_dict(name, data[name])
         for name in ("actor_updates", "model_updates", "critic_updates"):
             setattr(self, name, data[name])

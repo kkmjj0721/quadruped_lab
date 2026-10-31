@@ -44,7 +44,8 @@ def _validate_arguments(task_id: str, args: SuperMimicTrainConfig) -> None:
     _integer(args.max_iterations, 1, "max_iterations")
     _integer(args.save_interval, 1, "save_interval")
     _integer(args.log_interval, 1, "log_interval")
-    ExecutionConfig(imag_microbatch=args.imag_microbatch, critic_microbatch=args.critic_microbatch)
+    ExecutionConfig(imag_microbatch=args.imag_microbatch, critic_microbatch=args.critic_microbatch,
+                    wm_compile=args.wm_compile, fused_adam=args.fused_adam)
     if args.num_envs is not None:
         _integer(args.num_envs, 2, "num_envs")
     if args.seed is not None:
@@ -149,12 +150,14 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     print(f"[INFO] Logging experiment in directory: {log_dir}", flush=True)
     print(f"[INFO] Training with: task={task_id}, device={device}, seed={cfg.env.seed}", flush=True)
     print(f"[INFO] Control updates enabled: {cfg.runner.enable_control_updates}", flush=True)
-    execution = ExecutionConfig(imag_microbatch=args.imag_microbatch, critic_microbatch=args.critic_microbatch)
+    execution = ExecutionConfig(imag_microbatch=args.imag_microbatch, critic_microbatch=args.critic_microbatch,
+                                wm_compile=args.wm_compile, fused_adam=args.fused_adam)
     print(f"[INFO] SuperMimic {cfg.algorithm} training: envs={cfg.env.num_envs}, "
           f"collect_avg={cfg.algo.collect_steps:g}, utd={1.0 / cfg.algo.collect_steps:g}, "
           f"wm_batch={cfg.algo.wm_batch}, imag_batch={cfg.algo.imag_batch}, "
           f"replay={cfg.algo.replay_capacity}, compile={cfg.algo.compile_imagination}, "
-          f"imag_microbatch={execution.imag_microbatch}, critic_microbatch={execution.critic_microbatch}", flush=True)
+          f"imag_microbatch={execution.imag_microbatch}, critic_microbatch={execution.critic_microbatch}, "
+          f"wm_compile={execution.wm_compile}, fused_adam={execution.fused_adam}", flush=True)
     runner = make_go2_supermimic_runner(cfg, device=device, log_dir=log_dir, execution=execution)
     try:
         # 快照反映JSON与CLI覆盖后的实际配置，普通YAML类型便于直接查看和安全回读。

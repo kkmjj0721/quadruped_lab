@@ -60,6 +60,7 @@ class SuperMimicRunner:
         self.actor = make_actor(self.spec, cfg, self.task.observation_term_dims).to(self.device)
         self.policy = self.actor
         self.model = self._make_world_model().to(self.device)
+        self.model.configure_supervised_compile(enabled=self.execution.wm_compile, backend=cfg.compile_backend)
         self.critic = Critic(self.spec.privileged_dim, cfg.critic_hidden).to(self.device)
         self.learner = Learner(self.task, self.actor, self.model, self.critic, cfg, execution=self.execution)
         self.replay = Replay(self.spec, env.num_envs, cfg.replay_capacity, self.device)
@@ -256,8 +257,11 @@ class SuperMimicRunner:
         for name in ("actor", "critic"):
             getattr(self, name).load_state_dict(self._safe_policy[name])
         # 参考实现保留世界模型：它刚学到导致崩溃的真实样本，重载会让同一策略被再次利用。
-        self.learner.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=cfg.learning_rate, betas=(.9, .95))
-        self.learner.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=cfg.learning_rate)
+        fused = True if self.learner.execution.fused_adam else None
+        self.learner.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=cfg.learning_rate, betas=(.9, .95),
+                                                       fused=fused)
+        self.learner.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=cfg.learning_rate,
+                                                        fused=fused)
         self.learner.lr_multiplier *= .5
         self.learner.ramp_start = self.iteration
         self._collapse_strikes = 0
@@ -409,7 +413,7 @@ class SuperMimicRunner:
         saved_learner = data.get("learner", {})
         for name in ("actor", "model", "critic"):
             if same[name] and name in saved_learner:
-                getattr(self.learner, name + "_optimizer").load_state_dict(saved_learner[name])
+                self.learner.load_optimizer_state_dict(name, saved_learner[name])
             # 该累计计数仅用于本项目日志，不影响来源的学习率和预热排期。
             if continue_run and same[name]:
                 setattr(self.learner, name + "_updates", saved_learner.get(name + "_updates", 0))

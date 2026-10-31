@@ -7,16 +7,21 @@ import math
 
 @dataclass
 class ExecutionConfig:
-    """限制同时参与计算的样本数，不改变总训练批量或检查点语义。"""
+    """声明分批和默认s101执行方式，不改变总训练批量或检查点语义。"""
 
     imag_microbatch: int = 4096
     critic_microbatch: int = 32768
+    wm_compile: bool = True
+    fused_adam: bool = True
 
     def __post_init__(self):
         for name in ("imag_microbatch", "critic_microbatch"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        for name in ("wm_compile", "fused_adam"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a boolean")
 
 
 @dataclass

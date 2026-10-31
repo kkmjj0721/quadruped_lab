@@ -34,6 +34,10 @@ class SuperMimicTrainConfig:
     """单次想象反传的种子数上限；默认覆盖整个想象批量。"""
     critic_microbatch: int = 32768
     """单次critic反传的样本数上限；默认覆盖整个minibatch，保持每轮20次更新。"""
+    wm_compile: bool = True
+    """编译世界模型监督核心；后端沿用algo.compile_backend，默认s101开启。"""
+    fused_adam: bool = True
+    """三个优化器及护栏重建使用fused Adam；默认s101开启。"""
     log_root: str = "logs/supermimic"
     experiment_name: str = "go2_supermimic"
     run_name: str = ""
