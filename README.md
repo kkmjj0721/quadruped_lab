@@ -1,89 +1,79 @@
-# quadruped_lab
+# 🐾 Quadruped Lab
 
-基于 MjLab 的四足机器人项目，提供基础 PPO 和 Go2 SuperMimic 盲速度跟踪任务。SuperMimic 默认采用混合专家历史编码策略与可微世界模型。
+基于 **MjLab** 的四足机器人运动控制项目，面向 **Unitree Go2**，支持平地与粗糙地形的速度跟踪、策略训练、可视化播放和策略导出。
 
-## 安装
+提供 PPO 速度跟踪任务与 SuperMimic 盲速度跟踪任务。SuperMimic 使用混合专家历史策略与可微世界模型；Go2 PPO 任务使用 MjLab / RSL-RL 运行器。
 
-环境安装与检查见 [安装说明](docs/setup.md)。
+| 算法 | 平地任务 | 粗糙地形任务 |
+| --- | --- | --- |
+| PPO | `Unitree-Go2-Flat` | `Unitree-Go2-Rough` |
+| SuperMimic | `Unitree-Go2-SuperMimic-Flat` | `Unitree-Go2-SuperMimic-Rough` |
 
-## 算法
+## 🚀 快速开始
 
-项目算法统一位于 `agents/`，基础 PPO 放在 `agents/base/`。目录、环境接口与用法见 [算法说明](agents/README.md)。
-
-## Go2 SuperMimic 训练
-
-通过统一训练入口启动平地速度跟踪：
+环境要求：Linux x86_64、Python 3.11；GPU 训练使用兼容 CUDA 13.0 的 NVIDIA 驱动。以下命令均在仓库根目录执行。
 
 ```bash
+bash setup.sh --torch-backend cu130
+export PATH="$HOME/.local/bin:$PATH"
+uv run --no-sync python -B tools/check_install.py --device cuda
+```
+
+安装脚本会准备 uv、Python 和项目虚拟环境。CPU 安装与更多选项见 [安装指南](docs/setup.md)；日常运行保留 `--no-sync`，沿用已安装的后端。
+
+## 🧠 训练
+
+```bash
+# PPO：平地速度跟踪
+uv run --no-sync python scripts/train.py Unitree-Go2-Flat \
+  --env.scene.num-envs 4096 --agent.max-iterations 10001
+
+# SuperMimic：平地盲速度跟踪
 uv run --no-sync python scripts/train.py Unitree-Go2-SuperMimic-Flat \
   --device cuda:0 --num-envs 64 --max-iterations 1000
 ```
 
-粗糙地形使用 `Unitree-Go2-SuperMimic-Rough`，CPU 使用 `--device cpu`，环境数量至少为2。
-默认执行模型与策略更新；配置覆盖、仅模型训练、检查点续训及验证范围见
-[SuperMimic任务说明](docs/go2_supermimic.md)。
+粗糙地形使用表中对应的 `Rough` 任务。环境数与训练轮数按资源和实验目标调整；SuperMimic 至少使用 2 个并行环境，其他训练预算见 [任务指南](docs/go2_supermimic.md)。
 
-## Go2 PPO 任务
+默认产物目录：
 
-Go2 PPO 任务位于 `src/tasks/locomotion/go2_ppo/`，参考任务注册为 `Unitree-Go2-Flat` 和 `Unitree-Go2-Rough`。
+- **PPO**：`logs/rsl_rl/go2_ppo/<运行标识>/`
+- **SuperMimic**：`logs/supermimic/go2_supermimic/<运行标识>/`
 
-任务实现完整采用相邻 `legged_wbc_mjlab/src/tasks/locomotion/go2_ppo`，包含参考姿态奖励、阶段速度课程和原始域随机化。
+## 🎮 策略播放
 
-训练和播放入口参考相邻 `legged_wbc_mjlab/scripts/train.py`、`play.py`，
-通过任务 ID 读取注册的配置和 MjLab PPO runner。训练示例：
+将检查点路径替换为实际文件，并选择与训练一致的任务：
 
 ```bash
-uv run --no-sync python scripts/train.py Unitree-Go2-Flat \
-  --env.scene.num-envs 4096 --agent.max-iterations 10001
-```
-
-粗糙地形使用 `Unitree-Go2-Rough`。默认使用首张可见 GPU；CPU 轻量检查可传
-`--gpu-ids None --env.scene.num-envs 1 --agent.max-iterations 1`。
-环境和训练参数分别通过 `--env.*`、`--agent.*` 覆盖，例如 `--agent.seed 7`；
-布尔参数显式传入 `True` 或 `False`。完整参数见 `python scripts/train.py Unitree-Go2-Flat --help`。
-
-训练产物保存在 `logs/rsl_rl/<experiment_name>/<时间戳>[_run_name]/`，
-包含检查点、`policy.onnx` 和 `params/env.yaml`、`params/agent.yaml`；可通过
-`--log-root`、`--agent.experiment-name`、`--agent.run-name` 设置位置和名称。
-续训时指定已有实验目录名称，任务和网络配置应与检查点匹配：
-
-```bash
-uv run --no-sync python scripts/train.py Unitree-Go2-Flat \
-  --agent.resume True --agent.load-run '<已有实验目录名>' \
-  --agent.max-iterations 1000
-```
-
-播放本地检查点：
-
-```bash
+# 播放 PPO 策略
 uv run --no-sync python scripts/play.py Unitree-Go2-Flat \
+  --checkpoint-file '<实验目录>/model_1000.pt' --num-envs 1
+
+# 播放 SuperMimic 策略
+uv run --no-sync python scripts/play.py Unitree-Go2-SuperMimic-Flat \
   --checkpoint-file '<实验目录>/model_1000.pt' --num-envs 1
 ```
 
-`--viewer auto` 根据显示环境选择 MuJoCo 窗口或 Viser 浏览器查看器，也可显式设置
-`native`／`viser`。没有检查点时，可用 `--agent zero` 或 `--agent random` 检查环境。
-播放数量默认沿用任务配置；日常查看建议显式传入 `--num-envs 1`。
-`--video True` 启用录像；`python scripts/play.py Unitree-Go2-Flat --help` 可查看播放选项。
-两个入口也支持 `python -m scripts.train` 和 `python -m scripts.play`。
-旧入口 `scripts/train_go2.py` 已由统一训练入口替代。
+查看器默认自动选择 MuJoCo 窗口或 Viser 浏览器界面，也可通过 `--viewer native` / `--viewer viser` 指定。添加 `--video True` 可将录像保存到实验目录的 `videos/play/`。
 
-环境、奖励和课程参数见 [基础任务配置](src/tasks/locomotion/go2_ppo/go_ppo_env_cfg.py)，
-机器人与播放覆盖见 [环境工厂](src/tasks/locomotion/go2_ppo/config/env_cfgs.py)，
-网络、PPO 和 runner 默认值见 [训练配置](src/tasks/locomotion/go2_ppo/config/rl_cfg.py)。
-[Go2 配置](src/config/go2/go2_config.py) 提供机器人控制、初始状态和基础重置参数。
-任务默认使用 1 个环境，可通过 CLI 或返回的配置对象覆盖：
+没有检查点时，可用 `--agent zero --num-envs 1` 查看环境。SuperMimic 播放需要保留检查点同目录的 `task_config.json`。完整参数可在训练或播放命令后添加 `--help` 查看。
 
-```python
-from src.tasks.locomotion.go2_ppo.config import (
-    unitree_go2_ppo_runner_cfg,
-    unitree_go2_rough_env_cfg,
-)
+## 项目结构
 
-env_cfg = unitree_go2_rough_env_cfg()
-env_cfg.scene.num_envs = 64
-env_cfg.commands["twist"].ranges.lin_vel_x = (-0.5, 1.0)
-env_cfg.curriculum.pop("command_vel")  # 固定命令范围。
-
-runner_cfg = unitree_go2_ppo_runner_cfg()
-runner_cfg.algorithm.learning_rate = 5e-4
+```text
+src/tasks/   # 任务环境、奖励与课程
+src/config/  # 机器人与任务配置
+src/assets/  # 机器人模型与场景资源
+agents/      # 基础 PPO 组件与 SuperMimic 算法
+scripts/     # 训练与播放入口
+tools/       # 安装检查与策略导出
+docs/        # 安装与任务用法
 ```
+
+## 文档与许可
+
+- [SuperMimic 任务指南](docs/go2_supermimic.md)：配置、续训、评估与导出。
+- [算法说明](agents/README.md)：算法组件、接口与来源。
+- [Go2 配置](src/config/go2/)：机器人、控制与任务参数。
+
+项目采用 [MIT 许可](LICENSE)；引入的算法与机器人资产遵循各自目录中的许可及来源说明。

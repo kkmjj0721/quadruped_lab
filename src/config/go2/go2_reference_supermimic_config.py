@@ -218,10 +218,10 @@ class Go2ReferenceCfg(BaseConfig):
             stand_still = -2.0
             stand_still_joint_vel_l2 = -0.5  # 仅在站立命令下约束关节速度，权重是待训练验证的初值。
             foot_slip = -0.1
-            joint_acc_l2 = -2.5e-7
+            joint_acc_l2 = -3.0e-7
             stumble = -0.1
             joint_torques_l2 = -2.0e-5
             leg_collision = -1.0
             angular_momentum = -0.025
             hip_pos = -1.0
-            soft_landing = -2.0e-3
+            soft_landing = -3.0e-3
