@@ -4,7 +4,7 @@
 
 文中的本地工作记录位于 `docs/work/`，不随仓库提交。
 
-默认训练对齐指定 [Go2-SuperMimic](https://github.com/Zhengtianjin/go2-supermimic/tree/d9eee9b3f248e5300e636c433255db2c1c3e086a) 的训练结构和物理随机化，地形采用下述 Ri-5036 HIM 配置，actor 改用 [go2_rl_gym](https://github.com/wty-yy/go2_rl_gym/tree/30e74dc507bec7a642a8c98be26081f2c6f0822d) 的 MoECTS 学生部署网络。当前二十一项速度奖励以 [SuperMimic 英文 v1](../paper/SuperMimic_2610.28480v1.pdf) 第16页表 A.6 为起点，按用户要求将平移跟踪改为 HIM 的机体系 xy、偏航指数分母改为0.25并删除新训练侧倾项，增加下述 HIM 接触、角动量、髋姿态和落地冲击约束。命令采用 HIM 的 heading 逻辑；策略读取本体历史、速度命令和步态相位，线速度由历史隐式估计。
+默认训练对齐指定 [Go2-SuperMimic](https://github.com/Zhengtianjin/go2-supermimic/tree/d9eee9b3f248e5300e636c433255db2c1c3e086a) 的世界模型、想象BPTT和物理随机化，地形采用下述 Ri-5036 HIM 配置，actor使用 [go2_rl_gym](https://github.com/wty-yy/go2_rl_gym/tree/30e74dc507bec7a642a8c98be26081f2c6f0822d) MoECTS学生结构的8专家MoE历史编码器。当前二十一项速度奖励以 [SuperMimic 英文 v1](../paper/SuperMimic_2610.28480v1.pdf) 第16页表 A.6 为起点，按用户要求将平移跟踪改为 HIM 的机体系 xy、偏航指数分母改为0.25并删除新训练侧倾项，增加下述 HIM 接触、角动量、髋姿态和落地冲击约束。命令采用 HIM 的 heading 逻辑；策略读取本体历史、速度命令和步态相位，由历史隐式估计线速度。
 
 这属于用户确认的从零 Go2 速度控制迁移。原论文速度接口与动作模仿联合训练，参考仓库任务是追逐和闪避；本项目没有复现其动作库先验或演示成绩。集中配置见 [Go2ReferenceCfg](../src/config/go2/go2_reference_supermimic_config.py)，算法来源见 [NOTICE](../agents/supermimic/NOTICE.md)，资产来源见 [参考资产说明](../src/assets/robots/go2/REFERENCE_NOTICE.md)。本地工作记录中，与本仓库的逐项差异见[对比报告](work/analysis/go2_supermimic_vs_reference.md)，与相邻 `go2_him` 任务在命令采样、MDP 组装、奖励终止上的对齐评估见[任务层对齐评估](work/analysis/go2_supermimic_vs_go2_him.md)。
 
@@ -15,11 +15,13 @@
   --device cuda:0 --max-iterations 40000 --save-interval 1000
 ```
 
+新训练默认8MoE，也可通过 `--task-config src/config/go2/supermimic_moe8.json` 显式选择。已有8MoE检查点按同目录完整 `task_config.json` 恢复；局部配置覆盖其余预算的方式见下文。
+
 这是显式完整训练命令，不随单元测试启动。粗糙地形任务为 `Unitree-Go2-SuperMimic-Rough`，地形生成配置来自本地 `legged_wbc_mjlab@4eb8fcf71124b20ed4a1154b6c724ba962a424f8` 的 `src/tasks/locomotion/ri_5036_him/ri_5036_him_env_cfg.py:578–615`：8×8米地块、6行、20米外围平地，包含平地、0.8米箱体网格及四种正／四种倒金字塔楼梯。配置保留 `num_cols=20`，但 MjLab 1.6 课程模式按每种子地形一列实际生成6×10；`seed=None`与来源一致，需固定地图时显式设置地形种子。地形布局、高程查询和扫描布局保持不变；难度升降采用同提交 `go2_him/go2_him_env_cfg.py` 转导的 `ri_4438_him/mdp/curriculums.py:terrain_levels_vel`：距地块原点超过半块长度且期望命令距离至少1米时晋级，实际净位移不足期望距离一半时降级，晋级优先；期望距离包含历史世界系命令位移和提前结束时剩余时长的要求。越过最高级时随机回落到现有等级，最低等级为零；仅真实结束回合结算，手动重置不升降。保留零级训练起点，不再按训练进度开放难度，`terrain.curriculum_iterations` 仅保留为旧配置字段。粗糙地形 actor 仍然没有高程输入，不能继承参考有高程策略的效果。
 
 世界模型拟合预算对齐论文表A.5：每轮10批2048个8步窗口；想象批量仍采用参考仓库 `logs/supermimic/2026-10-27_17-09-24_flat/model_1000.pt` 中保存的4096条32步想象。真实采集按用户指定的 [zita-ch/supermimic_vibed@8bfc115](https://github.com/zita-ch/supermimic_vibed/blob/8bfc1158bd968f729fcc65d5e897a05b05ea3d36/supermimic/train.py#L300-L322)：`algo.collect_steps=2.5` 表示每轮平均控制步数，对应UTD=0.4；循环累加后取整，按2、3步交替，模型10批更新另计。
 
-执行方式默认使用工程消融的 `s101`：编译世界模型监督核心，并为 actor、世界模型、critic 使用 fused Adam；护栏重建及旧检查点恢复也沿用当前 fused 设置。监督核心后端使用 `algo.compile_backend`（默认 `inductor`），保留显式半精度舍入，命令采样仍按原顺序执行；想象编译继续由 `algo.compile_imagination` 控制。首次监督更新含编译开销。使用 `--wm-compile False --fused-adam False` 可关闭这两项以对照原工程基线；这些开关不改变任务参数、训练预算或检查点网络键，实际值写入 `params/agent.yaml` 的 `execution`。
+执行方式默认使用工程消融的 `s101`：编译世界模型监督核心，并为actor、世界模型和critic使用fused Adam；护栏重建及旧检查点恢复也沿用当前 fused 设置。监督核心后端使用 `algo.compile_backend`（默认 `inductor`），保留显式半精度舍入，命令采样仍按原顺序执行；想象编译继续由 `algo.compile_imagination` 控制。首次监督更新含编译开销。使用 `--wm-compile False --fused-adam False` 可关闭这两项以对照原工程基线；这些开关不改变任务参数、训练预算或检查点网络键，实际值写入 `params/agent.yaml` 的 `execution`。
 
 其余预算沿用指定Go2参考源码：4096环境、1000步/环境回放；世界模型1024³；300轮模型预热；actor动作MLP与critic均为ELU(512,256,128)。世界模型网络等设置仍与论文表A.4/A.5不同，其余参考预算按用户选择保留。训练循环外仍独立预填10步；累加器跨分段训练保留余量，重置采集或恢复时重新开始。回放直接保存完整半精度历史。旧检查点续训默认读取原 `task_config.json` 中的整数采集预算；若要按新节奏继续，显式提供含 `{"algo":{"collect_steps":2.5}}` 的 `--task-config`，并按原入口要求提供其他需要保留的任务参数。日志 `collection/control_steps` 为本轮实际步数，吞吐按真实转移差计算。
 
@@ -37,13 +39,13 @@
 
 使用 `--task-config <配置.json>`。这是独立缩减实验，运行快照保留差异；不是论文或参考仓库的完整训练预算。命令行环境数/seed覆盖JSON，JSON覆盖默认值。动作输出固定为无界线性输出，不提供动作限幅配置。
 
-每轮依次真实采集、世界模型自回归拟合、冻结模型权重并通过想象回报更新actor、以固定lambda-return拟合critic。保留参考OU探索、接触变化优先采样、稀有事件归档、学习率调度和保存点回滚。回滚只恢复actor/critic并重建其优化器，不恢复物理仿真。
+每轮依次真实采集、世界模型自回归拟合、冻结模型权重并通过想象回报更新完整actor、以固定lambda-return拟合critic。保留参考OU探索、接触变化优先采样、稀有事件归档、学习率调度和保存点回滚。回滚恢复actor／critic并重建其优化器，不恢复物理仿真。
 
 ## 任务与模型
 
-新训练actor单帧47维：机体系角速度3、重力投影3、带编码器偏置的关节角偏移12、关节速度12、上一下发动作12、速度命令3、步态相位sin／cos两维。历史为5帧235维，按旧到新逐帧排列，reset重复首帧。相位在原45列末尾追加，不采样噪声；时钟来自回合控制步，与步态奖励共用周期，命令平移模长加偏航绝对值不超过0.1时两维清零。仍不输入真实线速度、地形、接触或仿真参数；线速度由历史隐式估计。
+新训练actor单帧47维：机体系角速度3、重力投影3、带编码器偏置的关节角偏移12、关节速度12、上一下发动作12、速度命令3、步态相位sin／cos两维。历史为5帧235维，按旧到新逐帧排列，reset重复首帧。相位在原45列末尾追加，不采样噪声；时钟来自回合控制步，与步态奖励共用周期，命令平移模长加偏航绝对值不超过0.1时两维清零。仍不输入真实线速度、地形、接触或仿真参数；线速度由历史估计。
 
-actor为混合专家历史编码器：235维历史经共享ELU骨干(512,256)与按专家分组的1×1卷积得到8个32维专家输出，Softmax门控加权求和后`L2Norm`投影为32维隐变量；隐变量与独立归一化的当前帧47维拼接，经ELU MLP(512,256,128)输出12维未缩放动作。核心网络对齐 go2_rl_gym 提交 `30e74dc`，只用 SuperMimic 想象回报训练，不加入 CTS 的教师、蒸馏或负载均衡损失。旧45维／225维策略按其保存配置装配；两种观测宽度不能直接互换权重。
+默认 `algorithm="moe_history"`、`algo.moe_expert_num=8`：235维历史经共享ELU骨干(512,256)与分组1×1卷积得到8个32维专家输出，Softmax门控加权求和并做L2归一化；与当前47维拼成79维，动作MLP仍为(512,256,128)。该结构按 `go2_rl_gym@30e74dc`，仅由想象回报训练。旧45维／225维策略按保存配置装配；不同架构或观测宽度不能直接互换权重。
 
 命令采样以 `legged_wbc_mjlab@e6209ec` 的 `go2_him` 为来源；新训练默认vx/vy各为[-1,1]m/s，wz配置范围为[-2,2]rad/s，每4–12秒重采样。此前±4范围在两次训练诊断后收回；当前没有自动扩展到±4的速度课程。heading目标范围±3.14rad，`wz=clip(0.5*wrap(target-yaw),-2,2)`，因此该heading反馈实际产生的wz最多约±1.57rad/s；范围配置不改变反馈增益。heading比例1、站立比例0.1、forward比例0.05。保留来源实际顺序：forward先约束vx≥0.3和vy=0，随后heading会重新计算wz；站立最后把三个命令清零。真实与想象分别用真实／预测yaw更新命令。当前平移奖励评价机体系xy，偏航仍评价world z角速度；旧完整快照保留heading平移定义，部署及评估元数据显式记录各自坐标系。
 
@@ -69,13 +71,13 @@ actor为混合专家历史编码器：235维历史经共享ELU骨干(512,256)与
 
 ## 保存、续训、播放与评估
 
-产物位于 `logs/supermimic/go2_supermimic/<运行标识>/`，包含 `model_N.pt`（参数、优化器与计数）、`policy.onnx`（最近保存点的完整actor）、`events.out.tfevents.*`（TensorBoard逐轮标量与运行来源）和 `task_config.json`（任务快照，播放入口与续训依赖）。每 `--save-interval` 轮及最后一轮同步保存模型并覆盖当前ONNX；保留参考塌缩护栏，存在预警时跳过该保存点，继续保留上次模型与ONNX。ONNX元数据记录轮次和任务指纹。终端仍逐 `--log-interval` 轮打印原80列摘要；曲线操作见本地 [TensorBoard指南](work/TENSORBOARD_REMOTE.md)。
+产物位于 `logs/supermimic/go2_supermimic/<运行标识>/`，包含 `model_N.pt`（参数、优化器与计数）、`policy.onnx`（最近保存点的部署推理网络）、`events.out.tfevents.*`（TensorBoard逐轮标量与运行来源）和 `task_config.json`（任务快照，播放入口与续训依赖）。每 `--save-interval` 轮及最后一轮同步保存模型并覆盖当前ONNX；保留参考塌缩护栏，存在预警时跳过该保存点，继续保留上次模型与ONNX。ONNX元数据记录轮次和任务指纹。终端仍逐 `--log-interval` 轮打印原80列摘要；曲线操作见本地 [TensorBoard指南](work/TENSORBOARD_REMOTE.md)。
 
-新启动的训练另在 `params/` 集中保存 `env.yaml`（覆盖后的任务、奖励、命令及仿真参数）、`agent.yaml`（算法预算、执行分批与驱动配置）、`run.yaml`（命令、实际种子／环境数、依赖版本、续训来源和代码状态）及 `git.diff`（已跟踪文件相对HEAD的差异）。`task_config.json` 仍用于播放与续训；这些YAML供查看和比较实验配置，不直接作为 `--task-config` 输入。事件文件新增 `Loss/Train/Perf` 常用分组、速度RMSE、回合结束比例、回报分布、回放占用和三个优化器的实际学习率；原始tag保留。
+新启动的训练另在 `params/` 集中保存 `env.yaml`（覆盖后的任务、奖励、命令及仿真参数）、`agent.yaml`（算法预算、执行分批与驱动配置）、`run.yaml`（命令、实际种子／环境数、依赖版本、续训来源和代码状态）及 `git.diff`（已跟踪文件相对HEAD的差异）。`task_config.json` 仍用于播放与续训；这些YAML供查看和比较实验配置，不直接作为 `--task-config` 输入。事件文件新增 `Loss/Train/Perf` 常用分组、速度RMSE、回合结束比例、回报分布、回放占用、actor／世界模型／critic学习率；原始tag保留。
 
 终端每轮显示 `Reward_Rate/<name>`：本轮真实采集中所有环境的原始评分均值乘配置权重，不乘控制周期，从首次采集起就有实际数值，不等待回合结束、也不使用占位或旧值。当前两个速度跟踪项的上限均为2；所有分项相加再乘控制周期，等于本轮平均单步奖励。该实时口径是用户指定的显示适配，不能当作HIM已结束回合统计。`Mean reward` 与 `Mean episode length` 仍为最近最多100个已结束回合的均值，无历史回合时省略这两行。TensorBoard逐轮增加同名 `Reward_Rate/*` 标量；原有 `task/reward/*` 单步贡献、`task/reward_raw/*` 原始评分及 `Episode_Reward/*` 回合统计继续保留，后者仍为结束回合的累计加权奖励除以最大回合时长、仅有数据时写入。新格式在下次启动或续训时生效，具体口径见本地[日志设计](work/design/go2_blind_supermimic.md#2026-10-29奖励分项对齐-go2-him)。
 
-新部署策略输入`[B,235]`、输出`[B,12]`，图内包含归一化、MoE编码器和动作MLP；旧45维策略仍导出`[B,225]`输入。heading目标采样、相位生成和历史维护均由调用方在图外完成；元数据记录实际布局、时钟／站立门控、关节顺序、默认姿态、动作比例和命令坐标系。需要带轮次的PT／ONNX／JSON三件套时可显式导出：
+新部署策略输入`[B,235]`、输出`[B,12]`，默认图内包含双路归一化、8MoE编码器和动作MLP；旧45维MoE策略仍导出`[B,225]`输入。heading目标采样、相位生成和历史维护均由调用方在图外完成；元数据记录实际布局、时钟／站立门控、关节顺序、默认姿态、动作比例和命令坐标系。需要带轮次的PT／ONNX／JSON三件套时可显式导出：
 
 ```bash
 .venv/bin/python -B tools/export_supermimic_policy.py '<实验目录>/model_1000.pt' \
@@ -109,23 +111,13 @@ CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 .venv/bin/python -B -m unittest \
   tests.test_tasks.test_go2_supermimic_driver \
   tests.test_scripts.test_supermimic_config -v
 
-RUN_REFERENCE_CPU=1 OMP_NUM_THREADS=1 .venv/bin/python -B -m unittest \
-  tests.test_training.test_reference_supermimic_training -v
-
-RUN_REFERENCE_GPU=1 OMP_NUM_THREADS=1 .venv/bin/python -B -m unittest \
-  tests.test_training.test_reference_supermimic_training -v
-
-RUN_SUPERMIMIC_HIM_LONG=1 OMP_NUM_THREADS=1 .venv/bin/python -B -m unittest \
-  tests.test_training.test_supermimic_him_integration -v
 ```
 
-常规测试不自动启动训练。显式CPU检查用4环境和小网络，flat/rough各4轮；GPU检查用完整参考网络、64环境、64个模型窗口和128条想象，保留8步拟合与32步想象。两者均检查实际参数更新、保存/恢复、播放和部署。算法/任务对拍分别读取 `GO2_RL_GYM_ROOT`（混合专家编码器）与 `GO2_SUPERMIMIC_REFERENCE`（参考任务语义），均指定上述固定提交仓库；缺少参考源码时该对拍项明确跳过。
-
-长训练检查保持完整网络、64环境及缩减的采样批量，初始化和首次编译完成后实际训练660秒，结束后统一检查指标、检查点、ONNX和继续训练。源代码快照、配置与退出状态保留在独立验证产物中。实际执行与独立审查维护在本地 [同主题审查记录](work/review/go2_blind_supermimic.md)；运行检查只能证明对应环节可用，不能代替收敛与真机验收。
+常规测试不自动启动训练。算法／任务对拍分别读取 `GO2_RL_GYM_ROOT`（混合专家编码器）与 `GO2_SUPERMIMIC_REFERENCE`（参考任务语义），均指定上述固定提交仓库；缺少参考源码时该对拍项明确跳过。显式MoE训练检查入口为 `tests/test_training/test_mainline_supermimic_collection.py`，运行预算、验收标准和命令见其模块说明；完整训练须单独启动。实际执行与独立审查维护在本地 [同主题审查记录](work/review/go2_blind_supermimic.md)，运行检查不能代替收敛与真机验收。
 
 ## 配置版本
 
-当前只支持 `moe_history`（检查点与导出格式 `supermimic_moe_v1` / `supermimic_moe_policy_v1`）。旧的单 MLP 格式、历史 CTS 与蒸馏路径不再支持；变更前的配置和检查点需要重新训练，不做静默转换。论文、来源记录和历史实验产物保留用于追溯。
+新训练默认8专家 `moe_history`，检查点／部署格式为 `supermimic_moe_v1`／`supermimic_moe_policy_v1`。完整旧MoE快照读取时保持原网络、任务指纹和配置文件内容；历史MoE快照中未启用的 `him_*` 参数仅在读取时移除。4MoE、2MoE及HIM专用训练配置与HIM算法实现已删除，历史日志、检查点和导出文件保留；当前训练、播放和导出入口不再装配HIM检查点。旧单MLP、历史CTS与蒸馏路径仍不支持。论文与来源记录继续保留用于追溯。
 
 十六项奖励沿用v4状态布局：物理97、memory42、critic234，新奖励选择由配置指纹区分。已有十五项v4完整快照缺少站立速度权重时，读取边界显式补0，指纹省略禁用的新字段；原范围、奖励和检查点哈希保留，仍可按原语义播放／恢复。只改代码不会改变已有权重的动作，也不会给旧快照续训自动启用新项。采用新设置热启动时应显式提供当前 `--task-config`、保持 `--continue-run False`，奖励变化时用 `--reset-critic True` 重新学习价值；同形状世界模型和actor可保留。新JSON文件内容为 `{}` 即使用当前默认任务参数，也可按需局部覆盖。
 
@@ -133,4 +125,4 @@ RUN_SUPERMIMIC_HIM_LONG=1 OMP_NUM_THREADS=1 .venv/bin/python -B -m unittest \
 
 外部策略驱动通过任务配置 `runner.driver` 提供：`policy` 指向 go2_rl_gym 的 MoE-CTS 导出文件，`expert_policy` 指向本项目同观测接口的MoE检查点，`frac`/`expert_frac` 为环境占比，`fade_iterations` 控制线性衰减。驱动环境位于环境尾部切片，只接管动作、跟随本任务速度命令，只贡献真实数据，不参与策略更新。
 
-算法位于平铺的 `agents/supermimic/`，任务配置段为 `algo`。新增奖励、命令及地形改变了任务语义，旧任务快照不能直接作为本轮验收配置；如需旧MoE权重热启动，显式提供当前 `--task-config`，由参考形状检查决定加载或重新初始化相应网络，不能把它称为原实验的无变化继续训练。SuperMimic训练只接受本任务的扁平参数；旧 `--gpu-ids`、`--agent.*` 别名不再翻译。
+算法位于平铺的 `agents/supermimic/`，任务配置段为 `algo`。新增奖励、命令及地形改变了任务语义，旧任务快照不能直接作为本轮验收配置；如需旧MoE权重热启动，显式提供选择 `moe_history` 的当前 `--task-config`，由参考形状检查决定加载或重新初始化相应网络，不能把它称为原实验的无变化继续训练。SuperMimic训练只接受本任务的扁平参数；旧 `--gpu-ids`、`--agent.*` 别名不再翻译。

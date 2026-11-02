@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：提供混合专家历史策略和价值网络。"""
+"""内容：提供混合专家历史策略及价值网络。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from torch import Tensor, nn
 
 from .world_model import RunningNorm
 
+
+# ---------- 基础网络与MoE基线 ----------
 
 class Mlp(nn.Module):
     """与 go2_rl_gym 的 MLP 同名同层级，使专家权重可原样热启动。"""
@@ -109,6 +111,10 @@ class MoeActor(nn.Module):
         """导出与播放校验需要检查的归一化模块。"""
         return (self.normalizer, self.frame_normalizer)
 
+    def policy_parameters(self):
+        """MoE基线仍由想象目标更新整个历史策略。"""
+        return self.parameters()
+
     def framed(self, history: Tensor) -> Tensor:
         """接受[B,T,D]或展平的[B,T*D]；导出图传入展平历史，训练传入分帧历史。"""
         return history if history.dim() == 3 else history.reshape(-1, self.history_length, self.observation_dim)
@@ -171,9 +177,13 @@ class MoeActor(nn.Module):
         self.load_state_dict(merged, strict=True)
 
 
+# ---------- 装配与价值网络 ----------
+
 def make_actor(spec, config, observation_term_dims=None):
-    """装配唯一的混合专家盲策略。"""
-    return MoeActor(spec, config, observation_term_dims)
+    """按明确模型标识装配混合专家历史策略。"""
+    if spec.model_id == "supermimic_moe_v1":
+        return MoeActor(spec, config, observation_term_dims)
+    raise ValueError(f"Unsupported policy model identifier: {spec.model_id}")
 
 
 class Critic(nn.Module):

@@ -2,7 +2,9 @@
 
 # SuperMimic 来源与适配
 
-## 当前 MoE 基准
+## 8MoE主线与SuperMimic机制
+
+训练使用 `moe_history`、默认8个专家，检查点格式为 `supermimic_moe_v1`。本目录作为本项目源码维护，不依赖参考项目的Python运行环境。
 
 `supermimic_moe_v1` 按用户确认的 Go2 盲（本体感知）速度跟踪路线实现：算法沿用 SuperMimic，actor 采用 `go2_rl_gym` 的混合专家网络，其余训练机制对齐指定参考实现。
 
@@ -19,9 +21,9 @@
 - lambda-return 保留参考 `surv[t+1]/clamp(surv[t],1e-6)` 的低存活数值语义；critic 每个 epoch 按 `n//critic_minibatches` 分片，余数按来源丢弃。非有限梯度跳过对应优化器更新；`nonfinite_steps` 依来源统计模型及 actor，critic 另用 `critic_skipped` 记录。非有限日志值省略并报告跳过计数，不改变终端版式。
 - 护栏每50轮判定一次，按来源对发生过任何reset的step求失败绝对数量均值，包含只有超时而跌倒数为0的reset step；没有reset的step不进入分母。依据 MjLab1.6 `manager_based_rl_env.py:434,471,614` 和 `termination_manager.py:95`，每step清空`extras["log"]`，仅reset路径输出终止统计。该值以 `guard/falls_per_reset_step` 记录。
 - `load(path, continue_run=False, reset_critic=False)` 默认热启动并从第0轮重新计时；继续训练保留迭代号。模型形状变化时保留新构造的模型，策略更新推迟至至少1500轮；critic形状变化或显式重置时，actor冻结至策略更新起点之后500轮。只恢复已载入网络的同形状优化器，不恢复回放、仿真、RNG、护栏学习率缩放或旧预热排期。
-- 检查点和导出仅支持 `supermimic_moe_v1` 格式；actor形状不兼容时拒绝热启动。任务语义的继续训练检查由任务装配层负责，普通热启动允许任务语义变化。短流程验证不代表速度跟踪已收敛。
+- MoE检查点和部署格式为 `supermimic_moe_v1`／`supermimic_moe_policy_v1`；actor形状不兼容时拒绝热启动。任务语义的继续训练检查由任务装配层负责，普通热启动允许任务语义变化。短流程验证不代表速度跟踪已收敛。
 
-盲性边界：actor 只读取五帧本体观测，不含线速度、地形扫描、摩擦或 COM；线速度必须由历史经专家隐式估计。地形与仿真上下文只进入世界模型与 critic。MoE 结构来自 `go2_rl_gym` 而非论文，因此其收敛性不属于论文结论。
+盲性边界：actor部署时只读取五帧本体观测，不含真实线速度、地形扫描、摩擦或COM；线速度由历史隐式估计。地形与仿真上下文只进入世界模型与critic。外部论文和项目的训练成绩不代表本组合已验证的效果。
 
 ## 与参考实现的有意差异
 

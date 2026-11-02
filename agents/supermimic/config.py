@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：声明混合专家历史的参考训练预算、预热排期和显式资源覆盖参数。"""
+"""内容：声明混合专家历史策略的训练预算、预热排期和显式资源覆盖参数。"""
 
 from dataclasses import dataclass
 import math
@@ -26,7 +26,7 @@ class ExecutionConfig:
 
 @dataclass
 class SuperMimicConfig:
-    """采集调度按8bfc115，模型批量按论文表A.5，其余预算参考d9eee9b3，专家结构按30e74dc。"""
+    """采集按8bfc115、模型批量按表A.5、MoE按30e74dc，其余参考d9eee9b3。"""
 
     replay_capacity: int = 1000
     # 每轮平均真实控制步；2.5对应UTD=0.4，循环累计后取整。

@@ -80,6 +80,8 @@ def read_settings(path: Path) -> tuple[dict, bool]:
     if complete_snapshot:
         # 缺少该段的历史快照属于45维足高代理任务；局部新JSON沿用新训练默认。
         settings.setdefault("experiment", {"contact_source": "height", "actor_phase": False})
+        if settings.get("algorithm", "moe_history") == "moe_history" and isinstance(settings.get("algo"), dict):
+            settings["algo"] = moe_checkpoint_settings(settings["algo"])
     reward = settings.get("reward")
     if isinstance(reward, dict) and isinstance(reward.get("scales"), dict):
         scales = reward["scales"]
@@ -122,7 +124,7 @@ def _migrate_sections(settings: dict) -> dict:
 
 
 def configuration_for_settings(settings: dict | None = None):
-    """只接受当前混合专家历史策略配置；未声明算法时使用同一默认值。"""
+    """只接受混合专家历史策略，未声明算法时使用同一默认值。"""
     from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
     settings = settings or {}
@@ -135,3 +137,8 @@ def configuration_for_settings(settings: dict | None = None):
         # 仅显式历史配置保留已删除奖励的声明，随后仍由统一覆盖入口校验权重。
         cfg.reward.scales.torso_sideways_lean = 0.0
     return cfg
+
+
+def moe_checkpoint_settings(settings: dict) -> dict:
+    """读取历史MoE快照时移除不参与其网络和任务指纹的估计器参数。"""
+    return {name: value for name, value in settings.items() if not name.startswith("him_")}

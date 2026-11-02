@@ -257,11 +257,7 @@ class SuperMimicRunner:
         for name in ("actor", "critic"):
             getattr(self, name).load_state_dict(self._safe_policy[name])
         # 参考实现保留世界模型：它刚学到导致崩溃的真实样本，重载会让同一策略被再次利用。
-        fused = True if self.learner.execution.fused_adam else None
-        self.learner.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=cfg.learning_rate, betas=(.9, .95),
-                                                       fused=fused)
-        self.learner.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=cfg.learning_rate,
-                                                        fused=fused)
+        self.learner.reset_policy_optimizers()
         self.learner.lr_multiplier *= .5
         self.learner.ramp_start = self.iteration
         self._collapse_strikes = 0
@@ -340,7 +336,8 @@ class SuperMimicRunner:
                            control_learning_rate=self.learner.actor_optimizer.param_groups[0]["lr"],
                            nonfinite_steps=self.learner.nonfinite_steps)
             metrics.update({"timing/collection_seconds": collection_time, "timing/world_model_seconds": model_time,
-                            "timing/control_seconds": control_time, "timing/learning_seconds": model_time + control_time,
+                            "timing/control_seconds": control_time,
+                            "timing/learning_seconds": model_time + control_time,
                             "timing/iteration_seconds": elapsed,
                             "timing/session_elapsed_seconds": self.elapsed,
                             "timing/eta_seconds": self.elapsed / self.session_iterations * (target - self.iteration),

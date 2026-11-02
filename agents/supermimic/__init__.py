@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：公开 SuperMimic 状态协议、混合专家历史策略及训练运行器。"""
+"""内容：公开SuperMimic状态协议、MoE历史策略及训练运行器。"""
 
 from .config import ExecutionConfig, SuperMimicConfig
 from .export import export_policy

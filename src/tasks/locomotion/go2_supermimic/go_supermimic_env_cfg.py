@@ -17,7 +17,7 @@ from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.viewer import ViewerConfig
 
-from src.assets.robots.go2_reference import get_reference_go2_robot_cfg
+from src.assets.robots.go2.go2_reference import get_reference_go2_robot_cfg
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
 from .mdp.state_spec import FOOT_NAMES

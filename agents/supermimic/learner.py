@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：更新物理模型、直接优化历史策略，并拟合固定想象价值目标。"""
+"""内容：更新物理模型，以想象回报优化动作并拟合价值目标。"""
 
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -45,12 +45,10 @@ class Learner:
     def __init__(self, task, actor, model, critic, config, execution=None):
         self.actor, self.model, self.critic, self.config = actor, model, critic, config
         self.execution = ExecutionConfig(**asdict(execution if execution is not None else ExecutionConfig()))
+        self.reset_policy_optimizers()
         # 关闭时沿用原默认自动选择foreach；显式False会改为单张量更新。
         fused = True if self.execution.fused_adam else None
-        self.actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.learning_rate, betas=(0.9, 0.95),
-                                                fused=fused)
         self.model_optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, fused=fused)
-        self.critic_optimizer = torch.optim.Adam(critic.parameters(), lr=config.learning_rate, fused=fused)
         self.imagination = Imagination(task, actor, model, critic, config)
         self.actor_updates = 0
         self.model_updates = 0
@@ -60,6 +58,14 @@ class Learner:
         self.ramp_start = 0
         self.actor_frozen_until = 0
         self.policy_start = config.warmup_iterations
+
+    def reset_policy_optimizers(self):
+        """重建策略和价值优化器；世界模型优化器由其独立生命周期管理。"""
+        cfg = self.config
+        fused = True if self.execution.fused_adam else None
+        self.actor_optimizer = torch.optim.Adam(self.actor.policy_parameters(), lr=cfg.learning_rate,
+                                                betas=(0.9, 0.95), fused=fused)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=cfg.learning_rate, fused=fused)
 
     def schedule(self, iteration: int):
         """策略斜率从冻结结束、预热结束和回滚点三者最晚处起算。"""
@@ -120,7 +126,7 @@ class Learner:
                     metrics[name] = metrics.get(name, 0) + value * weight
                 # 下段前释放已反传的计算图，只保留价值监督需要的脱离梯度张量。
                 del data, targets, loss, values, part
-            gradient = clip_gradients(self.actor.parameters(), cfg.grad_clip, cfg.grad_clip_element)
+            gradient = clip_gradients(self.actor.policy_parameters(), cfg.grad_clip, cfg.grad_clip_element)
             finite = bool(torch.isfinite(gradient)) and bool(torch.isfinite(metrics["control_loss"]))
             if not finite:
                 self.nonfinite_steps += 1
@@ -169,10 +175,11 @@ class Learner:
         return _finite_metrics(metrics)
 
     def state_dict(self):
-        return {"actor": self.actor_optimizer.state_dict(), "model": self.model_optimizer.state_dict(),
-                "critic": self.critic_optimizer.state_dict(), "actor_updates": self.actor_updates,
-                "model_updates": self.model_updates, "critic_updates": self.critic_updates,
-                "nonfinite_steps": self.nonfinite_steps}
+        state = {"actor": self.actor_optimizer.state_dict(), "model": self.model_optimizer.state_dict(),
+                 "critic": self.critic_optimizer.state_dict(), "actor_updates": self.actor_updates,
+                 "model_updates": self.model_updates, "critic_updates": self.critic_updates,
+                 "nonfinite_steps": self.nonfinite_steps}
+        return state
 
     def load_optimizer_state_dict(self, name, data):
         """沿用当前融合执行选项，加载原步数、动量和其余优化器参数。"""

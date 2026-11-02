@@ -96,7 +96,7 @@ class Go2ReferenceCfg(BaseConfig):
         """内置位置执行器对齐 legged_wbc_mjlab Go2；动作比例按关节类型显式设置。"""
 
         stiffness = {"hip": 20.0, "thigh": 20.0, "calf": 40.0}
-        damping = {"hip": 0.5, "thigh": 0.5, "calf": 1.0}
+        damping = {"hip": 1.0, "thigh": 1.0, "calf": 2.0}
         effort_limit = {"hip": 23.7, "thigh": 23.7, "calf": 45.43}
         # 保留旧快照字段；内置位置执行器不使用直流电机的速度限制。
         velocity_limit = {"hip": 30.1, "thigh": 30.1, "calf": 20.07}
@@ -216,7 +216,7 @@ class Go2ReferenceCfg(BaseConfig):
             body_orientation_l2 = -0.2
             smoothness = -0.01
             stand_still = -2.0
-            stand_still_joint_vel_l2 = -0.5  # 仅在站立命令下约束关节速度，权重是待训练验证的初值。
+            stand_still_joint_vel_l2 = -1.0  # 仅在站立命令下约束关节速度，权重是待训练验证的初值。
             foot_slip = -0.1
             joint_acc_l2 = -3.0e-7
             stumble = -0.1

@@ -6,7 +6,7 @@
     机器人资产使用控制、碰撞和初始状态字段，复制的 PPO 任务读取控制和基础重置字段。
     任务其余环境参数及 PPO 默认值直接定义在 go2_ppo 目录；本模块保留的旧环境、
     命令、随机化、奖励与训练字段不再控制该任务。机器人模型和执行器装配由
-    `src/assets/robots/go2_constants.py` 负责。
+    `src/assets/robots/go2/go2_constants.py` 负责。
 """
 
 import math

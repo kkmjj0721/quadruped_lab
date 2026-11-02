@@ -12,7 +12,8 @@ from pathlib import Path
 
 import torch
 
-from agents.supermimic.policy import MoeActor, make_actor
+from agents.supermimic.config import SuperMimicConfig
+from agents.supermimic.policy import make_actor
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
 from ..config.train_cfg import TASK_MODES
@@ -20,7 +21,7 @@ from ..go_supermimic_env_cfg import validate_config
 from ..mdp.reference_task import Go2ReferenceTaskModel
 from .runner import algorithm_config
 from ..config.loading import (
-    apply_settings, read_settings, configuration_for_settings,
+    apply_settings, read_settings, configuration_for_settings, moe_checkpoint_settings,
 )
 
 
@@ -58,8 +59,7 @@ def load_playback_source(task_id: str, checkpoint_file: str | Path) -> PlaybackS
         raise ValueError("Playback task terrain mode differs from the saved configuration")
     # 与训练保持相同的可信文件约定；只把所需策略装配到目标设备。
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    expected_format = "supermimic_moe_v1"
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != expected_format:
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_moe_v1":
         raise ValueError("Incompatible SuperMimic checkpoint format")
     task_metadata = checkpoint.get("go2_task")
     if (not isinstance(task_metadata, dict) or not isinstance(task_metadata.get("curriculum"), dict)
@@ -71,7 +71,7 @@ def load_playback_source(task_id: str, checkpoint_file: str | Path) -> PlaybackS
     return PlaybackSource(cfg, checkpoint, path, snapshot)
 
 
-def build_playback_policy(source: PlaybackSource, adapter) -> MoeActor:
+def build_playback_policy(source: PlaybackSource, adapter) -> torch.nn.Module:
     """用原训练语义验证权重，同时允许单环境、无噪声和固定课程播放。"""
     expected, actual = source.cfg.to_dict(), adapter.cfg.to_dict()
     for section, name in (("env", "num_envs"), ("noise", "add_noise"), ("terrain", "curriculum")):
@@ -87,7 +87,7 @@ def build_playback_policy(source: PlaybackSource, adapter) -> MoeActor:
     if checkpoint["spec"] != asdict(original_task.spec) or checkpoint["spec_hash"] != original_task.spec.hash:
         raise ValueError("Checkpoint task spec does not match the saved configuration and current robot")
     policy_config = algorithm_config(source.cfg)
-    if checkpoint.get("config") != asdict(policy_config):
+    if asdict(SuperMimicConfig(**moe_checkpoint_settings(checkpoint["config"]))) != asdict(policy_config):
         raise ValueError("SuperMimic checkpoint configuration mismatch")
     policy = make_actor(original_task.spec, policy_config,
                         observation_term_dims=original_task.observation_term_dims).to(adapter.device)

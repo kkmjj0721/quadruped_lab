@@ -2,7 +2,7 @@
 
 # Go2 SuperMimic 任务来源
 
-当前任务由 `mdp/reference_task.py`、`reference_state.py`、`reference_rewards.py`、`commands.py`、`gait_rewards.py`、`rl/world_model.py` 与集中配置定义。使用MoECTS部署网络、SuperMimic训练和HIM命令／接触奖励，不包含CTS教师或蒸馏。配置与使用见 [任务说明](../../../../docs/go2_supermimic.md)。
+当前任务由 `mdp/reference_task.py`、`reference_state.py`、`reference_rewards.py`、`commands.py`、`gait_rewards.py`、`rl/world_model.py` 与集中配置定义。默认使用8专家MoECTS历史结构及SuperMimic想象BPTT。命令／接触奖励沿用HIM来源，不包含CTS教师或蒸馏。配置与使用见 [任务说明](../../../../docs/go2_supermimic.md)。
 
 | 来源 | 固定版本与实际位置 | 采用内容与差异 |
 | --- | --- | --- |

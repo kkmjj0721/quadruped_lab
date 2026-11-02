@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：导出含混合专家历史编码器、双路观测归一化及动作网络的独立单策略。"""
+"""内容：导出含混合专家编码器、双路归一化及动作网络的独立策略。"""
 
 from copy import deepcopy
 import json
@@ -15,12 +15,14 @@ def _prepare_policy(actor, iteration, metadata):
     """冻结部署副本并生成两种导出入口共用的元数据。"""
     if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
         raise ValueError("Export iteration must be a nonnegative integer")
-    module = deepcopy(actor).cpu().eval().requires_grad_(False)
-    if any(not torch.isfinite(value).all() for value in module.state_dict().values()):
+    if any(not torch.isfinite(value).all() for value in actor.state_dict().values()):
         raise ValueError("Cannot export non-finite policy tensors")
+    module = deepcopy(actor).cpu().eval().requires_grad_(False)
     for normalizer in module.policy_normalizers():
         if (normalizer.var < 0).any() or normalizer.count <= 0:
             raise ValueError("Invalid policy normalization statistics")
+    encoder = {"type": "moe", "experts": module.encoder.moe.experts.expert_num,
+               "latent_dim": module.encoder.moe.experts.output_dim, "gate_input": "normalized_history"}
     information = {
         **(metadata or {}), "format": "supermimic_moe_policy_v1",
         "iteration": iteration,
@@ -33,9 +35,7 @@ def _prepare_policy(actor, iteration, metadata):
                           "formula": "clamp((x-mean)/(sqrt(var)+1e-6),-10,10)"},
         "action_semantics": "unscaled_joint_position_offsets", "action_transform": "identity",
         "actor_input_order": module.input_order,
-        "encoder": {"type": "moe", "experts": module.encoder.moe.experts.expert_num,
-                    "latent_dim": module.encoder.moe.experts.output_dim,
-                    "gate_input": "normalized_history"},
+        "encoder": encoder,
     }
     return module, information
 
@@ -57,7 +57,7 @@ def _write_onnx(module, path, information):
 
 
 def export_policy_onnx(actor, path, *, iteration: int, metadata=None):
-    """检查点保存时仅更新当前ONNX，包含MoE和归一化，不生成逐轮部署副本。"""
+    """检查点保存时更新含必要编码器与归一化的当前ONNX。"""
     module, information = _prepare_policy(actor, iteration, metadata)
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)

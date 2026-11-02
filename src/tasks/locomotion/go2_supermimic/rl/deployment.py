@@ -16,7 +16,7 @@ from agents.supermimic.export import export_policy
 from agents.supermimic.interfaces import AlgorithmSpec
 from agents.supermimic.policy import make_actor
 
-from ..config.loading import apply_settings, configuration_for_settings, read_settings
+from ..config.loading import apply_settings, configuration_for_settings, moe_checkpoint_settings, read_settings
 from ..mdp.reference_task import Go2ReferenceTaskModel
 from ..mdp.state_spec import JOINT_NAMES
 
@@ -76,7 +76,9 @@ def checkpoint_actor(checkpoint: dict):
     if any(not torch.isfinite(value).all() for value in checkpoint["actor"].values()):
         raise ValueError("Checkpoint contains non-finite policy tensors")
     spec = AlgorithmSpec(**checkpoint["spec"])
-    algorithm = SuperMimicConfig(**checkpoint["config"])
+    if "format" in checkpoint and checkpoint["format"] != spec.model_id:
+        raise ValueError("Checkpoint format differs from the policy model identifier")
+    algorithm = SuperMimicConfig(**moe_checkpoint_settings(checkpoint["config"]))
     if spec.observation_dim not in (45, 47):
         raise ValueError(f"Unsupported Go2 policy observation dimension: {spec.observation_dim}")
     if spec.history_length != 5:
