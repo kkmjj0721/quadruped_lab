@@ -113,35 +113,6 @@ def body_orientation_l2(
   return xy_squared
 
 
-def self_collision_cost(
-  env: ManagerBasedRlEnv,
-  sensor_name: str,
-  force_threshold: float = 10.0,
-) -> torch.Tensor:
-  """
-  惩罚自碰撞
-
-  数学公式:
-    c = Σ_{t=1..H} I( max_i ||F_{i,t}|| > F_th )   [有 force_history 时]
-    c = found                                       [无 force_history 时]
-
-  符号说明:
-    H      : 传感器历史缓存步数 (history_length)
-    F_{i,t}: 第 i 个接触点在子步 t 处的接触力向量
-    F_th   : 判定为有效碰撞的力阈值 (force_threshold)
-    I(·)   : 示性函数，只要任意接触力超阈值该步即计为 1
-  """
-  sensor: ContactSensor = env.scene[sensor_name]
-  data = sensor.data
-  if data.force_history is not None:
-    # force_history: [B, N, H, 3]
-    force_mag = torch.norm(data.force_history, dim=-1)  # [B, N, H]
-    hit = (force_mag > force_threshold).any(dim=1)  # [B, H]
-    return hit.sum(dim=-1).float()  # [B]
-  assert data.found is not None
-  return data.found.squeeze(-1)
-
-
 def body_angular_velocity_penalty(
   env: ManagerBasedRlEnv,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -303,58 +274,6 @@ def feet_gait(
           scale = (total_command > command_threshold).float()
           reward *= scale
   return reward
-
-
-class feet_swing_height:
-  """在落地时计算摆动足峰值高度与目标高度的偏差。"""
-
-  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
-    self.sensor_name = cfg.params["sensor_name"]
-    self.site_names = cfg.params["asset_cfg"].site_names
-    self.peak_heights = torch.zeros(
-      (env.num_envs, len(self.site_names)), device=env.device, dtype=torch.float32
-    )
-    self.step_dt = env.step_dt
-
-  def __call__(
-    self,
-    env: ManagerBasedRlEnv,
-    sensor_name: str,
-    target_height: float,
-    command_name: str,
-    command_threshold: float,
-    asset_cfg: SceneEntityCfg,
-  ) -> torch.Tensor:
-    asset: Entity = env.scene[asset_cfg.name]
-    contact_sensor: ContactSensor = env.scene[sensor_name]
-    command = env.command_manager.get_command(command_name)
-    assert command is not None
-    foot_heights = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
-    in_air = contact_sensor.data.found == 0
-    self.peak_heights = torch.where(
-      in_air,
-      torch.maximum(self.peak_heights, foot_heights),
-      self.peak_heights,
-    )
-    first_contact = contact_sensor.compute_first_contact(dt=self.step_dt)
-    linear_norm = torch.norm(command[:, :2], dim=1)
-    angular_norm = torch.abs(command[:, 2])
-    total_command = linear_norm + angular_norm
-    active = (total_command > command_threshold).float()
-    error = self.peak_heights / target_height - 1.0
-    cost = torch.sum(torch.square(error) * first_contact.float(), dim=1) * active
-    num_landings = torch.sum(first_contact.float())
-    peak_heights_at_landing = self.peak_heights * first_contact.float()
-    mean_peak_height = torch.sum(peak_heights_at_landing) / torch.clamp(
-      num_landings, min=1
-    )
-    env.extras["log"]["Metrics/peak_height_mean"] = mean_peak_height
-    self.peak_heights = torch.where(
-      first_contact,
-      torch.zeros_like(self.peak_heights),
-      self.peak_heights,
-    )
-    return cost
 
 
 def feet_slip(

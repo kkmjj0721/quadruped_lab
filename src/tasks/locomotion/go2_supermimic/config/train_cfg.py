@@ -16,7 +16,7 @@ TASK_MODES = {
 
 @dataclass(frozen=True)
 class SuperMimicTrainConfig:
-    """启动参数独立于任务语义；任务与网络细节从集中配置或JSON读取。"""
+    """仅声明启动参数及显式覆盖；训练默认由机器人Python配置提供。"""
 
     device: str = "cuda:0"
     """单个运行设备，例如cpu或cuda:0。"""
@@ -24,20 +24,20 @@ class SuperMimicTrainConfig:
     """覆盖并行环境数量；训练至少使用两个并行环境。"""
     seed: int | None = None
     """覆盖任务及网络随机种子。"""
-    max_iterations: int = 40000
-    """训练的目标总轮数；continue_run时从检查点轮次继续至此目标，与参考一致。"""
-    save_interval: int = 1000
-    """按累计轮数保存模型及ONNX；最后一轮也保存，参考塌缩护栏预警时跳过该保存点。"""
-    log_interval: int = 1
-    """终端分区日志间隔；TensorBoard仍逐轮保存。"""
-    imag_microbatch: int = 4096
-    """单次想象反传的种子数上限；默认覆盖整个想象批量。"""
-    critic_microbatch: int = 32768
-    """单次critic反传的样本数上限；默认覆盖整个minibatch，保持每轮20次更新。"""
-    wm_compile: bool = True
-    """编译世界模型监督核心；后端沿用algo.compile_backend，默认s101开启。"""
-    fused_adam: bool = True
-    """三个优化器及护栏重建使用fused Adam；默认s101开启。"""
+    max_iterations: int | None = None
+    """覆盖runner目标总轮数；未指定时沿用配置，续训仍解释为目标总轮数。"""
+    save_interval: int | None = None
+    """覆盖runner保存间隔；最后一轮也保存，塌缩护栏预警时跳过该保存点。"""
+    log_interval: int | None = None
+    """覆盖终端分区日志间隔；TensorBoard仍逐轮保存。"""
+    imag_microbatch: int | None = None
+    """覆盖单次想象反传的种子数上限；未指定时沿用runner配置。"""
+    critic_microbatch: int | None = None
+    """覆盖单次critic反传的样本数上限；未指定时沿用runner配置。"""
+    wm_compile: bool | None = None
+    """覆盖世界模型监督核心的编译开关；后端沿用algo.compile_backend。"""
+    fused_adam: bool | None = None
+    """覆盖全部优化器及护栏重建的fused Adam开关；未指定时沿用runner配置。"""
     log_root: str = "logs/supermimic"
     experiment_name: str = "go2_supermimic"
     run_name: str = ""

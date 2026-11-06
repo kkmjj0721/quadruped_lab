@@ -1,9 +1,8 @@
 # Copyright (c) 2026-2027 zh
-"""内容：为真实采集提供外部策略驱动，包含MoE-CTS策略和历史MLP策略及追逐转向。"""
+"""内容：为真实采集提供外部策略驱动，包含MoE-CTS策略和历史MLP策略。"""
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import torch
@@ -116,42 +115,3 @@ class ActorDriver:
         """专家回合结束后，用新回合首帧填满其历史。"""
         if self.fresh is not None:
             self.fresh.logical_or_(done)
-
-
-class ChaseSteer:
-    """把追逐目标转成速度命令，让外部策略在场地内持续产生行进数据。"""
-
-    def __init__(self, num_envs, device, speed_range, radius):
-        self.device, self.speed_range, self.radius = torch.device(device), speed_range, radius
-        self.speed = torch.zeros(num_envs, device=device)
-        self.goal = torch.zeros(num_envs, 2, device=device)
-        self.timer = torch.full((num_envs,), 2.0, device=device)
-
-    @torch.no_grad()
-    def resample(self, mask, center):
-        count = int(mask.sum())
-        if not count:
-            return
-        low, high = self.speed_range
-        self.speed[mask] = low + (high - low) * torch.rand(count, device=self.device)
-        angle = 2 * math.pi * torch.rand(count, device=self.device)
-        distance = self.radius * torch.sqrt(torch.rand(count, device=self.device))
-        self.goal[mask] = center[mask] + torch.stack((angle.cos(), angle.sin()), -1) * distance[:, None]
-        self.timer[mask] = 2 + torch.rand(count, device=self.device)
-
-    @torch.no_grad()
-    def __call__(self, dt, position, yaw, center):
-        """返回 [线速度, 0, 偏航角速度]；朝目标误差超过90度时不再前进。"""
-        self.timer -= dt
-        self.resample(self.timer <= 0, center)
-        direction = self.goal - position
-        distance = direction.norm(dim=-1)
-        error = torch.atan2(direction[:, 1], direction[:, 0]) - yaw
-        error = torch.atan2(error.sin(), error.cos())
-        speed = torch.minimum(self.speed, 1.5 * distance)
-        return torch.stack((speed * error.cos().clamp(min=0), torch.zeros_like(speed),
-                            (1.5 * error).clamp(-1.5, 1.5)), -1)
-
-    def reset(self, done, center):
-        """回合结束时重采样目标与速度。"""
-        self.resample(done, center)

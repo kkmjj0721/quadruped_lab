@@ -77,6 +77,8 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
         raise ValueError("Leg collision force threshold must be positive and finite")
     if not math.isfinite(cfg.reward.stumble_ratio) or cfg.reward.stumble_ratio <= 0:
         raise ValueError("Stumble force ratio must be positive and finite")
+    if not math.isfinite(cfg.reward.scales.is_terminated) or cfg.reward.scales.is_terminated > 0:
+        raise ValueError("Termination reward weight must be finite and nonpositive")
     standing_velocity_weight = cfg.reward.scales.stand_still_joint_vel_l2
     if not math.isfinite(standing_velocity_weight) or standing_velocity_weight > 0:
         raise ValueError("Standing joint velocity weight must be finite and nonpositive")

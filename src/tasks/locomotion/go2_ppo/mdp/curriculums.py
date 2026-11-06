@@ -1,7 +1,7 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    按参考实现提供地形、速度命令与奖励权重阶段课程。
+    按参考实现提供地形与速度命令阶段课程。
 """
 
 from __future__ import annotations
@@ -12,8 +12,7 @@ import torch
 
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-
-from .velocity_command import UniformVelocityCommandCfg
+from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -26,11 +25,6 @@ class VelocityStage(TypedDict):
   lin_vel_x: tuple[float, float] | None
   lin_vel_y: tuple[float, float] | None
   ang_vel_z: tuple[float, float] | None
-
-
-class RewardWeightStage(TypedDict):
-  step: int
-  weight: float
 
 
 def terrain_levels_vel(
@@ -97,18 +91,3 @@ def commands_vel(
     # "ang_vel_z_min": torch.tensor(cfg.ranges.ang_vel_z[0]),
     # "ang_vel_z_max": torch.tensor(cfg.ranges.ang_vel_z[1]),
   }
-
-
-def reward_weight(
-  env: ManagerBasedRlEnv,
-  env_ids: torch.Tensor,
-  reward_name: str,
-  weight_stages: list[RewardWeightStage],
-) -> torch.Tensor:
-  """根据训练步数阶段更新奖励项权重。"""
-  del env_ids  # 未使用。
-  reward_term_cfg = env.reward_manager.get_term_cfg(reward_name)
-  for stage in weight_stages:
-    if env.common_step_counter > stage["step"]:
-      reward_term_cfg.weight = stage["weight"]
-  return torch.tensor([reward_term_cfg.weight])

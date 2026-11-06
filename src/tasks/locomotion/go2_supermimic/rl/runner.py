@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 
 import torch
 
-from agents.supermimic.config import SuperMimicConfig
+from agents.supermimic.config import ExecutionConfig, SuperMimicConfig
 from agents.supermimic.export import export_policy_onnx
 from agents.supermimic.runner import SuperMimicRunner
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
@@ -24,13 +24,16 @@ def algorithm_config(cfg):
     driver = cfg.runner.driver
     values = {field.name: getattr(cfg.algo, field.name) for field in fields(SuperMimicConfig)}
     values.update(driver_frac=driver.frac, expert_frac=driver.expert_frac,
-                  driver_fade=tuple(driver.fade_iterations),
-                  driver_vmin=driver.speed_min, driver_vmax=driver.speed_max)
+                  driver_fade=tuple(driver.fade_iterations))
     return SuperMimicConfig(**values)
 
 
 class Go2SuperMimicRunner(SuperMimicRunner):
     _driver_metrics = {}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._fixed_collection_mask = self.deterministic_collection_mask.clone()
 
     def _make_world_model(self):
         """Go2接触头使用固定logit尺度，其余世界模型计算沿用通用实现。"""
@@ -59,6 +62,12 @@ class Go2SuperMimicRunner(SuperMimicRunner):
         驱动区由预训练策略行走，专家区由历史MLP策略行走，两者都只贡献真实数据，
         不参与策略更新；占比随迭代线性衰减到零。
         """
+        # 固定组不随命令改变，站立组在每个控制步重新计算。
+        self.deterministic_collection_mask = self._fixed_collection_mask
+        if self.task.cfg.runner.standing_zero_noise:
+            command = self.current.command
+            standing = command[:, :2].norm(dim=-1) + command[:, 2].abs() <= self.task.cfg.reward.stand_still_command_threshold
+            self.deterministic_collection_mask = self._fixed_collection_mask | standing
         cfg = self.config
         if self.driver is None and self.expert is None:
             return action
@@ -78,17 +87,11 @@ class Go2SuperMimicRunner(SuperMimicRunner):
             self._driver_metrics = {"driver/env_count": float(driver_count), "driver/expert_env_count": float(expert_count)}
         return action
 
-    def _arena_center(self):
-        """追逐目标以场地中心为基准；平地模式原点为零。"""
-        return torch.zeros(self.env.num_envs, 2, device=self.device)
-
     def _reset_drivers(self, done):
         if self.driver is not None:
             self.driver.reset(done)
         if self.expert is not None:
             self.expert.reset(done)
-        if self.steer is not None:
-            self.steer.reset(done, self._arena_center())
 
     def save(self, path):
         path = Path(path)
@@ -122,11 +125,14 @@ def make_go2_supermimic_runner(cfg=None, *, device="cpu", log_dir=None, executio
     """构造任务环境、可选驱动策略和任务快照，失败时释放仿真资源。"""
     cfg = cfg if cfg is not None else Go2ReferenceCfg()
     config = algorithm_config(cfg)
+    if execution is None:
+        execution = ExecutionConfig(**{field.name: getattr(cfg.runner, field.name) for field in fields(ExecutionConfig)})
     torch.manual_seed(cfg.env.seed)
     env = make_go2_supermimic_env(cfg, device=device)
     try:
         runner = Go2SuperMimicRunner(env, config, log_dir=log_dir,
-                                     control_enabled=cfg.runner.enable_control_updates, execution=execution)
+                                     control_enabled=cfg.runner.enable_control_updates, execution=execution,
+                                     collection_groups=env.terrain_curriculum.family_ids)
         if cfg.runner.driver.policy:
             from .driver import MoeCtsDriver
             runner.driver = MoeCtsDriver(cfg.runner.driver.policy, env.num_envs, env.task.default_joint_pos,

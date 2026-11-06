@@ -18,6 +18,7 @@ _SCALAR_GROUPS = {
     "wm_loss": "Loss/world_model",
     "critic_loss": "Loss/value",
     "control_loss": "Loss/control",
+    "control_task_loss": "Loss/control_task",
     "world_model_learning_rate": "Loss/world_model_learning_rate",
     "critic_learning_rate": "Loss/value_learning_rate",
     "control_learning_rate": "Loss/control_learning_rate",

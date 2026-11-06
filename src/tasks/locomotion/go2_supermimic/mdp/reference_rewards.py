@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：实现机体系平移及指定HIM共二十一项奖励；返回未乘控制周期的奖励率。"""
+"""内容：实现机体系平移、指定HIM及失败终止奖励；返回未乘控制周期的奖励率。"""
 
 import torch
 
@@ -14,7 +14,6 @@ from .gait_rewards import gait_reward_terms, posture_reward
 
 def reference_reward_terms(task, state, action, next_state, failure):
     """起点命令评价终点状态；真实与想象共用评分，历史侧倾仅供旧配置。"""
-    del failure
     cfg = task.cfg.reward
     physical = next_state.physical
     velocity = task.tracking_velocity(next_state)
@@ -36,6 +35,7 @@ def reference_reward_terms(task, state, action, next_state, failure):
                                             / cfg.tracking_linear_variance),
         "track_angular_velocity": torch.exp(-(velocity[:, 2] - state.command[:, 2]).square()
                                              / cfg.tracking_angular_variance),
+        "is_terminated": failure.float(),
         "action_rate_l2": (action - state.memory[:, PREVIOUS_ACTION]).square().sum(-1),
         "joint_pos_limits": ((lower - joint).clamp_min(0) + (joint - upper).clamp_min(0)).sum(-1),
         **legacy_sideways,
@@ -70,4 +70,21 @@ def reference_reward_terms(task, state, action, next_state, failure):
             command_magnitude > cfg.soft_landing_command_threshold)
     terms.update(gait_reward_terms(task, state, next_state))
     terms["pose"] = posture_reward(task, state, next_state)
+    if cfg.pose_tracking_gate:
+        linear_target = state.command[:, :2].square().sum(-1)
+        angular_target = state.command[:, 2].square()
+        linear_error = (velocity[:, :2] - state.command[:, :2]).square().sum(-1)
+        angular_error = (velocity[:, 2] - state.command[:, 2]).square()
+        linear_active = state.command[:, :2].norm(dim=-1) > cfg.stand_still_command_threshold
+        angular_active = state.command[:, 2].abs() > cfg.stand_still_command_threshold
+        # 未选中的分支仍求值，零目标分母置1，避免想象反传出现非有限梯度。
+        linear_denominator = torch.where(linear_active, linear_target, torch.ones_like(linear_target))
+        angular_denominator = torch.where(angular_active, angular_target, torch.ones_like(angular_target))
+        linear_gate = torch.where(linear_active, (1 - linear_error / linear_denominator).clamp(0, 1),
+                                  terms["track_linear_velocity"])
+        angular_gate = torch.where(angular_active, (1 - angular_error / angular_denominator).clamp(0, 1),
+                                   terms["track_angular_velocity"])
+        # 站立保留原姿态分，移动时由起点命令和终点速度共同决定姿态分。
+        gate = torch.where(standing, torch.ones_like(linear_gate), linear_gate * angular_gate)
+        terms["pose"] = terms["pose"] * gate
     return terms

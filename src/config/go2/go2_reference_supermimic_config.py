@@ -1,6 +1,7 @@
 # Copyright (c) 2026-2027 zh
 """内容：声明指定Go2参考模型、混合专家策略、HIM命令及二十一项速度奖励。"""
 
+from dataclasses import dataclass
 import math
 
 from agents.supermimic.config import SuperMimicConfig
@@ -11,7 +12,59 @@ class Go2ReferenceCfg(BaseConfig):
     """新训练默认；原论文没有本配置所需的 Go2 动作库先验。"""
 
     algorithm = "moe_history"
-    algo = SuperMimicConfig
+
+    @dataclass
+    class algo(SuperMimicConfig):
+        """本机器人的实际训练配方；驱动策略参数在runner.driver中维护。"""
+
+        # ---------- 采集与回放 ----------
+        replay_capacity: int = 1000
+        collect_steps: float = 2.5  # 每轮平均真实控制步，2／3步交替。
+        wm_prioritized_frac: float = 0.25
+        wm_archive_frac: float = 0.25
+        archive_size: int = 100000
+        archive_keep_prob: float = 0.02
+
+        # ---------- 世界模型与想象 ----------
+        wm_hidden: tuple[int, ...] = (2048, 2048, 2048)
+        wm_window: int = 8
+        wm_batch: int = 2048
+        wm_updates: int = 10
+        imag_batch: int = 4096
+        horizon: int = 32
+        gamma: float = 0.99
+        lam: float = 0.95
+
+        # ---------- 策略与价值网络 ----------
+        actor_hidden: tuple[int, ...] = (512, 256, 128)
+        critic_hidden: tuple[int, ...] = (512, 256, 128)
+        moe_expert_num: int = 8
+        moe_hidden: tuple[int, ...] = (512, 256, 128)
+        moe_latent_dim: int = 32
+
+        # ---------- 优化与排期 ----------
+        learning_rate: float = 2e-4
+        actor_lr_scale: float = 1.0
+        warmup_iterations: int = 300
+        wm_rewarmup_iterations: int = 1500
+        critic_warmup_iterations: int = 500
+        actor_ramp_iterations: int = 1000
+        lr_decay_iterations: int = 30000
+        lr_final_frac: float = 0.03
+        critic_epochs: int = 5
+        critic_minibatches: int = 4
+        grad_clip: float = 1.0
+        grad_clip_element: float = 0.1
+
+        # ---------- 探索噪声 ----------
+        action_noise: float = 0.3  # 采用本项目消融配方；标准差为动作缩放前单位，论文表A.5默认0.1。
+        collect_det_frac: float = 0.25  # 各地形按比例分配无额外动作探索噪声的环境。
+
+        # ---------- 编译与回滚 ----------
+        compile_imagination: bool = True
+        compile_backend: str = "inductor"
+        collapse_falls: float = 3.0
+        collapse_interval: int = 50
 
     class env:
         """固定任务协议的维度、环境规模及回合预算。"""
@@ -78,7 +131,17 @@ class Go2ReferenceCfg(BaseConfig):
             joint_vel = 1.5  # rad/s。
 
     class runner:
+        """本机器人的训练目标、保存节奏与执行预算；命令行可显式覆盖。"""
+
+        max_iterations = 40000
+        save_interval = 1000
+        log_interval = 1
+        imag_microbatch = 4096
+        critic_microbatch = 32768
+        wm_compile = True
+        fused_adam = True
         enable_control_updates = True
+        standing_zero_noise = True  # 站立命令采集关闭额外动作噪声，保留固定无噪声组。
 
         class driver:
             """外部策略在真实采集中代替当前策略行动，只贡献数据而不参与更新。"""
@@ -89,8 +152,6 @@ class Go2ReferenceCfg(BaseConfig):
             frac = 0.25
             expert_frac = 0.0
             fade_iterations = (1_000_000_000, 1_000_000_000)
-            speed_min = 0.5
-            speed_max = 3.0
 
     class control:
         """内置位置执行器对齐 legged_wbc_mjlab Go2；动作比例按关节类型显式设置。"""
@@ -177,6 +238,7 @@ class Go2ReferenceCfg(BaseConfig):
         body_ang_vel_frame = "body"  # 新训练按HIM约束机体系xy角速度；旧完整快照保留heading。
         tracking_linear_variance = 0.25
         tracking_angular_variance = 0.25
+        pose_tracking_gate = True  # 移动时以实际速度跟踪门控姿态奖励；站立保留原评分。
         fall_angle = math.radians(70)
         fall_softness_deg = 5.0
         stand_still_command_threshold = 0.1  # 命令平移模长加偏航绝对值不超过阈值时启用。
@@ -206,17 +268,18 @@ class Go2ReferenceCfg(BaseConfig):
         class scales:
             track_linear_velocity = 2.0
             track_angular_velocity = 2.0
+            is_terminated = -100.0  # 失败终止奖励率；想象端使用软失败概率，正常超时不罚。
             action_rate_l2 = -0.1
             joint_pos_limits = -10.0
             body_ang_vel = -0.05
             foot_gait = 0.5
             feet_air_time = 0.2
-            pose = 1.0
+            pose = 0.5
             lin_vel_z = -2.0
             body_orientation_l2 = -0.2
             smoothness = -0.01
             stand_still = -2.0
-            stand_still_joint_vel_l2 = -1.0  # 仅在站立命令下约束关节速度，权重是待训练验证的初值。
+            stand_still_joint_vel_l2 = -0.1  # 仅在站立命令下约束关节速度，权重是待训练验证的初值。
             foot_slip = -0.1
             joint_acc_l2 = -3.0e-7
             stumble = -0.1

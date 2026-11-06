@@ -30,6 +30,7 @@ def deployment_metadata(cfg, *, spec_hash: str, algorithm) -> dict:
     command_frame = f"{cfg.reward.tracking_linear_frame}_xy_world_yaw"
     return {
         "spec_hash": spec_hash, "algorithm": "moe_history_encoder",
+        "inference_action": "deterministic_mean",
         "input_shape": [None, width * cfg.env.num_obs_history],
         "observation_dim": width, "history_length": cfg.env.num_obs_history,
         "observation_layout": [

@@ -9,6 +9,8 @@ import json
 import math
 from pathlib import Path
 
+from agents.supermimic.config import checkpoint_policy_settings
+
 
 def _merge_mapping(defaults: dict, values: dict) -> dict:
     result = deepcopy(defaults)
@@ -78,10 +80,20 @@ def read_settings(path: Path) -> tuple[dict, bool]:
     wrapped = "config" in payload
     complete_snapshot = wrapped and {"spec_hash", "geometry_hash"}.issubset(payload)
     if complete_snapshot:
+        # 完整历史快照保留原奖励和采集定义；新训练及局部JSON使用主线新默认。
+        for section, name in (("reward", "pose_tracking_gate"), ("runner", "standing_zero_noise")):
+            values = settings.setdefault(section, {})
+            if isinstance(values, dict):
+                values.setdefault(name, False)
         # 缺少该段的历史快照属于45维足高代理任务；局部新JSON沿用新训练默认。
         settings.setdefault("experiment", {"contact_source": "height", "actor_phase": False})
         if settings.get("algorithm", "moe_history") == "moe_history" and isinstance(settings.get("algo"), dict):
             settings["algo"] = moe_checkpoint_settings(settings["algo"])
+        runner = settings.get("runner")
+        if isinstance(runner, dict) and isinstance(runner.get("driver"), dict):
+            # 旧追逐速度不再属于活动配置，完整快照仍可用于续训、播放与导出。
+            for name in ("speed_min", "speed_max"):
+                runner["driver"].pop(name, None)
     reward = settings.get("reward")
     if isinstance(reward, dict) and isinstance(reward.get("scales"), dict):
         scales = reward["scales"]
@@ -96,7 +108,7 @@ def read_settings(path: Path) -> tuple[dict, bool]:
         if complete_snapshot:
             # 完整旧快照缺失的新增奖励必须显式保留关闭状态，局部JSON沿用新默认。
             for name in ("stand_still_joint_vel_l2", "stumble", "joint_torques_l2", "leg_collision",
-                         "angular_momentum", "hip_pos", "soft_landing"):
+                         "angular_momentum", "hip_pos", "soft_landing", "is_terminated"):
                 scales.setdefault(name, 0.0)
             # 旧速度任务使用heading平移；完整新快照已有显式坐标定义。
             reward.setdefault("tracking_linear_frame", "heading")
@@ -140,5 +152,5 @@ def configuration_for_settings(settings: dict | None = None):
 
 
 def moe_checkpoint_settings(settings: dict) -> dict:
-    """读取历史MoE快照时移除不参与其网络和任务指纹的估计器参数。"""
-    return {name: value for name, value in settings.items() if not name.startswith("him_")}
+    """读取完整旧MoE固定方案配置，移除退休字段并拒绝已删除的探索方案。"""
+    return checkpoint_policy_settings({name: value for name, value in settings.items() if not name.startswith("him_")})

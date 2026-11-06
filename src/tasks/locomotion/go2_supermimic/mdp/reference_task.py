@@ -9,6 +9,7 @@ import math
 import torch
 from torch import Tensor
 
+from agents.supermimic.config import RUNNER_RUNTIME_FIELDS, exploration_semantics
 from agents.supermimic.interfaces import AlgorithmSpec, TaskState
 
 from .reference_rewards import reference_reward_terms
@@ -93,6 +94,16 @@ class Go2ReferenceTaskModel:
         两段并存或都不存在时无法判断意图，直接报错而非静默算出另一个指纹。
         """
         config = self.cfg.to_dict()
+        # 保存节奏和执行预算不改变任务定义，新增配置位置保留已有检查点指纹。
+        config["runner"] = {name: value for name, value in config["runner"].items() if name not in RUNNER_RUNTIME_FIELDS}
+        # 关闭新增开关时省略键，完整旧快照仍使用原奖励／采集指纹。
+        if not config["reward"]["pose_tracking_gate"]:
+            del config["reward"]["pose_tracking_gate"]
+        if not config["runner"]["standing_zero_noise"]:
+            del config["runner"]["standing_zero_noise"]
+        for name in ("algo", "single"):
+            if name in config:
+                config[name] = exploration_semantics(config[name])
         # 旧完整快照未声明角速度坐标，恢复heading后不改变原语义指纹。
         if config["reward"]["body_ang_vel_frame"] == "heading":
             del config["reward"]["body_ang_vel_frame"]
@@ -107,9 +118,10 @@ class Go2ReferenceTaskModel:
         # 旧45维任务关闭两项时保留既有指纹，新协议开关完整进入语义指纹。
         if config["experiment"] == {"contact_source": "height", "actor_phase": False}:
             del config["experiment"]
-        # 禁用新增站立速度项时保留已有十五项v4快照的指纹，非零权重标识新任务语义。
-        if config["reward"]["scales"]["stand_still_joint_vel_l2"] == 0.0:
-            del config["reward"]["scales"]["stand_still_joint_vel_l2"]
+        # 禁用新增项时保留旧快照的指纹，非零权重标识新任务语义。
+        for name in ("stand_still_joint_vel_l2", "is_terminated"):
+            if config["reward"]["scales"][name] == 0.0:
+                del config["reward"]["scales"][name]
         # 历史v4／v5布局不含腿部接触力，读取边界关闭新奖励后保留原指纹。
         if not self.leg_collision:
             del config["reward"]["scales"]["leg_collision"]

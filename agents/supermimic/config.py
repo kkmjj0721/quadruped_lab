@@ -5,6 +5,36 @@ from dataclasses import dataclass
 import math
 
 
+RETIRED_EXPLORATION_FIELDS = ("exploration_mode", "policy_objective", "exploration_std_min", "exploration_std_max",
+                              "exploration_std_lr_scale", "exploration_entropy_coef",
+                              "explore_frac", "explore_noise", "explore_theta")
+RETIRED_DRIVER_SPEED_FIELDS = ("driver_vmin", "driver_vmax")
+RUNNER_RUNTIME_FIELDS = ("max_iterations", "save_interval", "log_interval", "imag_microbatch",
+                         "critic_microbatch", "wm_compile", "fused_adam")
+
+
+def exploration_semantics(settings: dict) -> dict:
+    """保留固定方案的历史指纹结构，退休字段不再属于活动配置。"""
+    result = {name: value for name, value in settings.items() if name not in RETIRED_EXPLORATION_FIELDS}
+    # 仅保留历史hash序列化常量，不参与采集、想象或优化。
+    result.update(explore_frac=0.0, explore_noise=0.3, explore_theta=2.0)
+    if result.get("collect_det_frac", 0.0) == 0.0:
+        result.pop("collect_det_frac", None)
+    return result
+
+
+def checkpoint_policy_settings(settings: dict) -> dict:
+    """读取固定主线旧快照，移除退休参数；已移除的实验方案不能静默恢复。"""
+    if (settings.get("exploration_mode", "fixed") != "fixed"
+            or settings.get("policy_objective", "deterministic") != "deterministic"
+            or settings.get("explore_frac", 0.0) != 0.0):
+        raise ValueError("Only fixed Gaussian collection and deterministic imagination checkpoints are supported")
+    result = {name: value for name, value in settings.items()
+              if name not in RETIRED_EXPLORATION_FIELDS + RETIRED_DRIVER_SPEED_FIELDS}
+    result.setdefault("collect_det_frac", 0.0)
+    return result
+
+
 @dataclass
 class ExecutionConfig:
     """声明分批和默认s101执行方式，不改变总训练批量或检查点语义。"""
@@ -26,7 +56,7 @@ class ExecutionConfig:
 
 @dataclass
 class SuperMimicConfig:
-    """采集按8bfc115、模型批量按表A.5、MoE按30e74dc，其余参考d9eee9b3。"""
+    """共享算法字段、通用默认与校验；各机器人在自己的algo段声明实际训练配方。"""
 
     replay_capacity: int = 1000
     # 每轮平均真实控制步；2.5对应UTD=0.4，循环累计后取整。
@@ -58,10 +88,9 @@ class SuperMimicConfig:
     grad_clip_element: float = 0.1
     compile_imagination: bool = True
     compile_backend: str = "inductor"
+    # 论文表A.5：仅真实采集时逐步逐维独立添加固定高斯噪声，单位为动作缩放前单位。
     action_noise: float = 0.1
-    explore_frac: float = 0.25
-    explore_noise: float = 0.3
-    explore_theta: float = 2.0
+    collect_det_frac: float = 0.0  # 无额外动作探索噪声的环境比例；机器人配方显式选择。
     wm_prioritized_frac: float = 0.25
     wm_archive_frac: float = 0.25
     archive_size: int = 100000
@@ -71,8 +100,6 @@ class SuperMimicConfig:
     driver_frac: float = 0.25
     expert_frac: float = 0.0
     driver_fade: tuple[int, int] = (1_000_000_000, 1_000_000_000)
-    driver_vmin: float = 0.5
-    driver_vmax: float = 3.0
 
     def __post_init__(self):
         positive = ("replay_capacity", "wm_window", "wm_batch",
@@ -91,17 +118,20 @@ class SuperMimicConfig:
             if not values or any(isinstance(x, bool) or not isinstance(x, int) or x < 1 for x in values):
                 raise ValueError(f"{name} must contain positive integer widths")
             setattr(self, name, values)
-        for name in ("gamma", "lam", "lr_final_frac", "explore_frac", "wm_prioritized_frac", "wm_archive_frac", "archive_keep_prob"):
+        for name in ("gamma", "lam", "lr_final_frac", "wm_prioritized_frac", "wm_archive_frac", "archive_keep_prob"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError(f"{name} must be finite and within [0,1]")
+        if (isinstance(self.collect_det_frac, bool) or not isinstance(self.collect_det_frac, (int, float))
+                or not math.isfinite(self.collect_det_frac) or not 0 <= self.collect_det_frac <= 1):
+            raise ValueError("collect_det_frac must be finite and within [0,1]")
         if self.gamma == 1 or self.lr_final_frac == 0 or self.wm_prioritized_frac + self.wm_archive_frac > 1:
             raise ValueError("Invalid discount, final learning rate or replay fractions")
-        for name in ("learning_rate", "actor_lr_scale", "grad_clip", "grad_clip_element", "explore_theta"):
+        for name in ("learning_rate", "actor_lr_scale", "grad_clip", "grad_clip_element"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-        for name in ("action_noise", "explore_noise", "collapse_falls", "driver_vmin", "driver_vmax"):
+        for name in ("action_noise", "collapse_falls"):
             if isinstance(getattr(self, name), bool) or not math.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
         for name in ("driver_frac", "expert_frac"):
@@ -111,8 +141,6 @@ class SuperMimicConfig:
         if (len(self.driver_fade) != 2 or any(isinstance(x, bool) or not isinstance(x, int) for x in self.driver_fade)
                 or self.driver_frac + self.expert_frac > 1):
             raise ValueError("Driver fade must be two iterations and driver plus expert share cannot exceed one")
-        if self.driver_frac and (self.driver_vmin <= 0 or self.driver_vmax < self.driver_vmin):
-            raise ValueError("Driver speed range must be positive and ordered")
         if not isinstance(self.compile_imagination, bool):
             raise ValueError("compile_imagination must be a boolean")
         if not isinstance(self.compile_backend, str) or not self.compile_backend:

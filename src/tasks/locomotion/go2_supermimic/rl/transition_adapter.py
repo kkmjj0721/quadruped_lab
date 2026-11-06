@@ -111,24 +111,6 @@ class Go2TransitionAdapter:
             self._state.command.copy_(self._play_commands)
             self._state.memory[:, COMMAND_OVERRIDE] = 1
 
-    def planar_pose(self):
-        """返回各环境机身世界坐标xy与航向，供外部驱动生成追逐命令。"""
-        if self._state is None:
-            raise RuntimeError("Reset the Go2 adapter before reading its pose")
-        return self.task.world_position(self._state)[:, :2], self.task.yaw(self._state)
-
-    @torch.no_grad()
-    def set_commands(self, commands):
-        """按环境写入速度命令，供外部驱动接管命令支路；播放期间以固定命令为准。"""
-        if self._state is None:
-            raise RuntimeError("Reset the Go2 adapter before writing commands")
-        values = torch.as_tensor(commands, dtype=torch.float32, device=self.device)
-        if values.shape != (self.num_envs, 3) or not torch.isfinite(values).all():
-            raise ValueError("Driver commands must be finite [num_envs,3]")
-        if self._play_commands is None:
-            self._state.command.copy_(values)
-            self._state.memory[:, COMMAND_OVERRIDE] = 1
-
     # ---------- 回合重置 ----------
 
     def _set_origins(self, ids):

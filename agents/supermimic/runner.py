@@ -17,7 +17,8 @@ import torch
 from .interfaces import append_history
 from .logging import TrainingLogger
 from .buffer import Replay, Window, WindowArchive
-from .config import ExecutionConfig, SuperMimicConfig
+from .config import ExecutionConfig, SuperMimicConfig, checkpoint_policy_settings
+from .exploration import stratified_collection_mask
 from .learner import Learner
 from .policy import Critic, make_actor
 from .world_model import WorldModel
@@ -42,10 +43,22 @@ def _cpu_tree(value):
     return deepcopy(value)
 
 
+def _validate_network_state(state, label="network"):
+    """在检查点边界校验网络张量和归一化统计，不加载任何已有模块。"""
+    if not isinstance(state, dict) or any(not isinstance(value, torch.Tensor) or not torch.isfinite(value).all()
+                                          for value in state.values()):
+        raise ValueError(f"Checkpoint contains invalid or non-finite {label} tensors")
+    if any((value < 0).any() for key, value in state.items() if key.endswith(".var")):
+        raise ValueError(f"Checkpoint contains invalid {label} normalization variance")
+    if any((value <= 0).any() for key, value in state.items() if key.endswith(".count")):
+        raise ValueError(f"Checkpoint contains invalid {label} normalization count")
+
+
 class SuperMimicRunner:
     """参考采集与优化循环；恢复区分重新计时的热启动与保留迭代号的继续训练。"""
 
-    def __init__(self, env, config: SuperMimicConfig, log_dir=None, control_enabled=True, execution=None):
+    def __init__(self, env, config: SuperMimicConfig, log_dir=None, control_enabled=True, execution=None,
+                 collection_groups=None):
         self.env, self.task, self.spec = env, env.task, env.task.spec
         self.device = torch.device(env.device)
         self.config = SuperMimicConfig(**asdict(config))
@@ -53,10 +66,15 @@ class SuperMimicRunner:
         cfg = self.config
         if not math.isfinite(self.task.dt) or self.task.dt <= 0:
             raise ValueError("Task control timestep must be finite and positive")
-        if cfg.explore_frac and cfg.explore_theta * self.task.dt >= 2:
-            raise ValueError("OU exploration requires explore_theta * control_dt < 2")
         if cfg.replay_capacity <= cfg.wm_window + 1:
             raise ValueError("Replay capacity must exceed the world-model window by at least two")
+        if collection_groups is None:
+            collection_groups = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
+        if (not isinstance(collection_groups, torch.Tensor) or collection_groups.shape != (env.num_envs,)
+                or collection_groups.device != self.device
+                or collection_groups.dtype not in (torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8)):
+            raise ValueError("Collection groups must be an integer tensor with one entry per environment on its device")
+        self.deterministic_collection_mask = stratified_collection_mask(collection_groups, cfg.collect_det_frac)
         self.actor = make_actor(self.spec, cfg, self.task.observation_term_dims).to(self.device)
         self.policy = self.actor
         self.model = self._make_world_model().to(self.device)
@@ -69,9 +87,7 @@ class SuperMimicRunner:
         self.iteration = self.real_steps = self.imagined_steps = 0
         self._collect_step_accumulator = 0.0
         self.current = self.history = None
-        self.ou_noise = torch.zeros(env.num_envs, self.spec.action_dim, device=self.device)
-        self.exploration_count = int(env.num_envs * cfg.explore_frac)
-        self.driver = self.expert = self.steer = None
+        self.driver = self.expert = None
         self.log_dir = Path(log_dir) if log_dir is not None else None
         self.logger = TrainingLogger(self.log_dir, num_envs=env.num_envs, device=self.device)
         self.target_iteration = 0
@@ -126,7 +142,6 @@ class SuperMimicRunner:
         self._collect_step_accumulator = 0.0
         frame = self.task.observe(self.current, noisy=True)
         self.history = frame[:, None].repeat(1, self.spec.history_length, 1)
-        self.ou_noise.zero_()
         self.episode_returns.zero_()
         self.episode_lengths.zero_()
         self.completed_episodes.clear()
@@ -151,13 +166,8 @@ class SuperMimicRunner:
         for _ in range(steps):
             observation = self.history[:, -1]
             action = self._override_actions(self.actor(self.history), self.history, observation)
-            # 参考先为全部环境推进OU，再生成全部独立噪声；未使用OU的行仍推进其随机过程。
-            decay = 1 - cfg.explore_theta * self.task.dt
-            sigma_ou = cfg.explore_noise * (2 * cfg.explore_theta) ** .5
-            self.ou_noise.mul_(decay).add_(sigma_ou * self.task.dt ** .5
-                                          * torch.randn_like(action))
             noise = cfg.action_noise * torch.randn_like(action)
-            noise[:self.exploration_count] = self.ou_noise[:self.exploration_count]
+            noise.masked_fill_(self.deterministic_collection_mask[:, None], 0)
             action = action + noise
             if not torch.isfinite(action).all():
                 raise FloatingPointError("Collected actions are non-finite")
@@ -179,7 +189,6 @@ class SuperMimicRunner:
             frame = self.task.observe(result.next_state, noisy=True)
             history = append_history(self.history, frame)
             self.history = torch.where(done[:, None, None], frame[:, None].expand_as(history), history)
-            self.ou_noise.masked_fill_(done[:, None], 0)
             if self.driver is not None or self.expert is not None:
                 self._reset_drivers(done)
             self.current = result.next_state.detached_clone()
@@ -256,14 +265,13 @@ class SuperMimicRunner:
             return
         for name in ("actor", "critic"):
             getattr(self, name).load_state_dict(self._safe_policy[name])
-        # 参考实现保留世界模型：它刚学到导致崩溃的真实样本，重载会让同一策略被再次利用。
         self.learner.reset_policy_optimizers()
         self.learner.lr_multiplier *= .5
         self.learner.ramp_start = self.iteration
         self._collapse_strikes = 0
         metrics["guard/rollback"] = 1.0
         print(f"[WARN] Collapse guard: {falls:.1f} falls per reset step, "
-              f"restored saved actor and critic; lr scale {self.learner.lr_multiplier:.3g}", flush=True)
+              f"restored saved policy and value states; lr scale {self.learner.lr_multiplier:.3g}", flush=True)
 
     def learn(self, iterations):
         if isinstance(iterations, bool) or not isinstance(iterations, int) or iterations < 1:
@@ -387,19 +395,24 @@ class SuperMimicRunner:
         data = torch.load(path, map_location=self.device, weights_only=False)
         if data.get("format") != self.spec.model_id:
             raise ValueError("SuperMimic checkpoint format or task specification mismatch")
+        saved_config = checkpoint_policy_settings(data["config"])
+        if continue_run and saved_config["collect_det_frac"] != self.config.collect_det_frac:
+            raise ValueError("Deterministic collection fraction changed; use an explicit warm start")
         same = {}
         for name, checkpoint_key in (("actor", "actor"), ("critic", "critic"), ("model", "world_model")):
             state = data[checkpoint_key]
-            if any(not torch.isfinite(value).all() for value in state.values()):
-                raise ValueError("Checkpoint contains non-finite network tensors")
-            if any((value < 0).any() for key, value in state.items() if key.endswith(".var")):
-                raise ValueError("Checkpoint contains invalid normalization variance")
-            if any((value <= 0).any() for key, value in state.items() if key.endswith(".count")):
-                raise ValueError("Checkpoint contains invalid normalization count")
+            _validate_network_state(state)
             current = getattr(self, name).state_dict()
             same[name] = set(current) == set(state) and all(current[key].shape == state[key].shape for key in current)
         if not same["actor"]:
             raise ValueError("Actor shape changed: no warm start is defined for this observation or architecture")
+        saved_learner = data.get("learner", {})
+        counters = {}
+        for name in ("iteration", "real_steps", "imagined_steps"):
+            value = data.get(name, 0) if continue_run else 0
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("Invalid checkpoint training counters")
+            counters[name] = value
         self.actor.load_state_dict(data["actor"])
         if same["model"]:
             self.model.load_state_dict(data["world_model"])
@@ -407,7 +420,6 @@ class SuperMimicRunner:
         if same["critic"]:
             self.critic.load_state_dict(data["critic"])
         self.learner = Learner(self.task, self.actor, self.model, self.critic, self.config, execution=self.execution)
-        saved_learner = data.get("learner", {})
         for name in ("actor", "model", "critic"):
             if same[name] and name in saved_learner:
                 self.learner.load_optimizer_state_dict(name, saved_learner[name])
@@ -423,10 +435,7 @@ class SuperMimicRunner:
             self.learner.actor_frozen_until = max(self.learner.actor_frozen_until,
                                                  self.learner.policy_start + self.config.critic_warmup_iterations)
             print(f"Critic re-initialised; actor frozen until iteration {self.learner.actor_frozen_until}", flush=True)
-        for name in ("iteration", "real_steps", "imagined_steps"):
-            value = data.get(name, 0) if continue_run else 0
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError("Invalid checkpoint training counters")
+        for name, value in counters.items():
             setattr(self, name, value)
         self.current = self.history = None
         # 与指定参考一致，恢复进程重新开始采集相位，物理与回放同时重置。

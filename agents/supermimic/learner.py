@@ -95,6 +95,38 @@ class Learner:
         return _finite_metrics({"wm_loss": loss.detach(), "wm_grad_norm": gradient.detach(),
                                 "wm_valid_steps": window.valid.sum(), "wm_skipped": float(not finite)})
 
+    def _fit_critic(self, features, targets):
+        """以固定想象目标拟合价值网络，保留尾批与分批累积语义。"""
+        cfg = self.config
+        critic, optimizer = self.critic, self.critic_optimizer
+        critic.normalizer.update(features)
+        losses = []
+        skipped = updates = 0
+        minibatch = features.shape[0] // cfg.critic_minibatches
+        if minibatch == 0:
+            raise ValueError("Imagined transitions must fill at least one row per critic minibatch")
+        for _ in range(cfg.critic_epochs):
+            indices = torch.randperm(features.shape[0], device=features.device)
+            # 参考按整除的小批宽度取片，余数不参与本轮critic监督。
+            for index in range(cfg.critic_minibatches):
+                selected = indices[index * minibatch:(index + 1) * minibatch]
+                optimizer.zero_grad(set_to_none=True)
+                value_loss = features.new_zeros(())
+                for part in selected.split(self.execution.critic_microbatch):
+                    partial_loss = (critic(features[part]) - targets[part]).square().mean()
+                    weighted_loss = partial_loss * (part.numel() / selected.numel())
+                    weighted_loss.backward()
+                    value_loss += weighted_loss.detach()
+                    del partial_loss, weighted_loss
+                gradient = clip_gradients(critic.parameters(), cfg.grad_clip)
+                if bool(torch.isfinite(gradient)):
+                    optimizer.step()
+                    updates += 1
+                else:
+                    skipped += 1
+                losses.append(value_loss)
+        return torch.stack(losses).mean(), skipped, updates, minibatch
+
     def improve(self, seed, *, freeze_actor=False):
         cfg = self.config
         batch = seed.history.shape[0]
@@ -113,7 +145,6 @@ class Learner:
                 data = self.imagination.rollout(part)
                 targets = self.imagination.lambda_returns(data)
                 loss = -data.objective.mean()
-                # 每段保留完整时间反传，尾段按样本数加权；整批仅更新一次策略。
                 (loss * weight).backward()
                 feature_batches.append(data.features[:, :-1].flatten(0, 1).detach())
                 target_batches.append(targets.flatten().detach())
@@ -124,54 +155,27 @@ class Learner:
                           "imagination/reward": data.rewards.mean()}
                 for name, value in values.items():
                     metrics[name] = metrics.get(name, 0) + value * weight
-                # 下段前释放已反传的计算图，只保留价值监督需要的脱离梯度张量。
                 del data, targets, loss, values, part
-            gradient = clip_gradients(self.actor.policy_parameters(), cfg.grad_clip, cfg.grad_clip_element)
+            parameters = self.actor.policy_parameters()
+            gradient = clip_gradients(parameters, cfg.grad_clip, cfg.grad_clip_element)
             finite = bool(torch.isfinite(gradient)) and bool(torch.isfinite(metrics["control_loss"]))
             if not finite:
                 self.nonfinite_steps += 1
             if not freeze_actor and finite:
                 self.actor_optimizer.step()
-        if not freeze_actor and finite:
-            self.actor_updates += 1
+                self.actor_updates += 1
         features = torch.cat(feature_batches)
         targets = torch.cat(target_batches)
         del feature_batches, target_batches
-        # 目标已经固定；统计更新不能改变同一次监督的目标值。
-        self.critic.normalizer.update(features)
-        losses = []
-        skipped = 0
-        minibatch = features.shape[0] // cfg.critic_minibatches
-        if minibatch == 0:
-            raise ValueError("Imagined transitions must fill at least one row per critic minibatch")
-        for _ in range(cfg.critic_epochs):
-            indices = torch.randperm(features.shape[0], device=features.device)
-            # 参考按整除的小批宽度取片，余数不参与本轮critic监督。
-            for index in range(cfg.critic_minibatches):
-                selected = indices[index * minibatch:(index + 1) * minibatch]
-                self.critic_optimizer.zero_grad(set_to_none=True)
-                value_loss = features.new_zeros(())
-                # 保持原小批边界和优化器步数，仅分拆小批内部的前向与反向峰值。
-                for part in selected.split(self.execution.critic_microbatch):
-                    partial_loss = (self.critic(features[part]) - targets[part]).square().mean()
-                    weighted_loss = partial_loss * (part.numel() / selected.numel())
-                    weighted_loss.backward()
-                    value_loss += weighted_loss.detach()
-                    del partial_loss, weighted_loss
-                critic_gradient = clip_gradients(self.critic.parameters(), cfg.grad_clip)
-                if bool(torch.isfinite(critic_gradient)):
-                    self.critic_optimizer.step()
-                    self.critic_updates += 1
-                else:
-                    skipped += 1
-                losses.append(value_loss)
-        metrics.update({"control_grad_norm": gradient.detach(), "critic_loss": torch.stack(losses).mean(),
+        value_loss, skipped, updates, minibatch = self._fit_critic(features, targets)
+        self.critic_updates += updates
+        metrics.update({"control_grad_norm": gradient.detach(), "critic_loss": value_loss,
                         "control_skipped": float(not finite), "critic_skipped": skipped,
-                        "nonfinite_steps": self.nonfinite_steps,
                         "control_learning_rate": self.actor_optimizer.param_groups[0]["lr"],
                         "execution/imag_batch": batch,
                         "execution/imag_microbatch": min(batch, self.execution.imag_microbatch),
                         "execution/critic_microbatch": min(self.execution.critic_microbatch, minibatch)})
+        metrics["nonfinite_steps"] = self.nonfinite_steps
         return _finite_metrics(metrics)
 
     def state_dict(self):

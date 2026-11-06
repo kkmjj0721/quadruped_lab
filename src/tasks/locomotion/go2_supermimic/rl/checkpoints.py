@@ -6,13 +6,14 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 
 import torch
 
-from agents.supermimic.config import SuperMimicConfig
+from agents.supermimic.config import RETIRED_DRIVER_SPEED_FIELDS, SuperMimicConfig
 from agents.supermimic.policy import make_actor
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
@@ -81,7 +82,18 @@ def build_playback_policy(source: PlaybackSource, adapter) -> torch.nn.Module:
         raise ValueError("Playback configuration changed unsupported task semantics")
     if source.snapshot["geometry_hash"] != adapter.surface.geometry_hash:
         raise ValueError("Playback terrain geometry differs from the saved task")
-    original_task = Go2ReferenceTaskModel(source.cfg, adapter.task.default_joint_pos, adapter.task.joint_limits,
+    original_cfg = deepcopy(source.cfg)
+    # 退休速度只参与旧快照的原始指纹校验，不回写活动配置或新快照。
+    snapshot_cfg = source.snapshot["config"]
+    legacy_algo = {**snapshot_cfg.get("single", {}), **snapshot_cfg.get("algo", {})}
+    for name in RETIRED_DRIVER_SPEED_FIELDS:
+        if name in legacy_algo:
+            setattr(original_cfg.algo, name, legacy_algo[name])
+    legacy_driver = snapshot_cfg.get("runner", {}).get("driver", {})
+    for name in ("speed_min", "speed_max"):
+        if name in legacy_driver:
+            setattr(original_cfg.runner.driver, name, legacy_driver[name])
+    original_task = Go2ReferenceTaskModel(original_cfg, adapter.task.default_joint_pos, adapter.task.joint_limits,
                                          adapter.surface, device=adapter.device)
     checkpoint = source.checkpoint
     if checkpoint["spec"] != asdict(original_task.spec) or checkpoint["spec_hash"] != original_task.spec.hash:

@@ -2,9 +2,18 @@
 """
 内容：
     按 Go2 配置装配独立的 MJCF 资产、执行器、初始状态和碰撞规则。
+    直接运行时使用配置中的初始姿态打开 MuJoCo 资产查看器。
+
+用法：
+    .venv/bin/python src/assets/robots/go2/go2_constants.py
 """
 
 from pathlib import Path
+import sys
+
+# 直接执行文件时，从当前项目解析 src 包。
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 import mujoco
 from mjlab.actuator import BuiltinPositionActuatorCfg
@@ -92,3 +101,14 @@ FULL_COLLISION = _DEFAULT_ROBOT_CFG.collisions[0]
 GO2_ARTICULATION = _DEFAULT_ROBOT_CFG.articulation
 GO2_HIP, GO2_THIGH, GO2_CALF = GO2_ARTICULATION.actuators
 FEET_ONLY_COLLISION = _make_collision_cfg(Go2Cfg().collision, feet_only=True)
+
+
+if __name__ == "__main__":
+    import mujoco.viewer as viewer
+
+    robot = get_go2_robot_cfg().build()
+    model = robot.spec.compile()
+    data = mujoco.MjData(model)
+    mujoco.mj_resetDataKeyframe(model, data, model.key("init_state").id)
+    mujoco.mj_forward(model, data)
+    viewer.launch(model, data)

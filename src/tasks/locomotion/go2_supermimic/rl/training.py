@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from datetime import datetime
 from importlib.metadata import version
 import json
@@ -20,7 +20,7 @@ import torch
 import yaml
 from mjlab.utils.torch import configure_torch_backends
 
-from agents.supermimic.config import ExecutionConfig
+from agents.supermimic.config import ExecutionConfig, RUNNER_RUNTIME_FIELDS
 
 from ..config.loading import (
     apply_settings as _apply_settings, read_settings as _read_settings,
@@ -41,18 +41,19 @@ def _integer(value, minimum: int, name: str) -> None:
 def _validate_arguments(task_id: str, args: SuperMimicTrainConfig) -> None:
     if task_id not in TASK_MODES:
         raise ValueError(f"Unknown Go2 SuperMimic task: {task_id}")
-    _integer(args.max_iterations, 1, "max_iterations")
-    _integer(args.save_interval, 1, "save_interval")
-    _integer(args.log_interval, 1, "log_interval")
-    ExecutionConfig(imag_microbatch=args.imag_microbatch, critic_microbatch=args.critic_microbatch,
-                    wm_compile=args.wm_compile, fused_adam=args.fused_adam)
+    for name in ("max_iterations", "save_interval", "log_interval"):
+        value = getattr(args, name)
+        if value is not None:
+            _integer(value, 1, name)
+    ExecutionConfig(**{field.name: getattr(args, field.name) for field in fields(ExecutionConfig)
+                       if getattr(args, field.name) is not None})
     if args.num_envs is not None:
         _integer(args.num_envs, 2, "num_envs")
     if args.seed is not None:
         _integer(args.seed, 0, "seed")
     if args.model_only is not None and not isinstance(args.model_only, bool):
         raise ValueError("model_only must be a boolean or None")
-    if not isinstance(args.continue_run, bool) or not isinstance(args.reset_critic, bool):
+    if not all(isinstance(getattr(args, name), bool) for name in ("continue_run", "reset_critic")):
         raise ValueError("continue_run and reset_critic must be booleans")
     if args.resume is None and (args.continue_run or args.reset_critic):
         raise ValueError("continue_run and reset_critic require a resume checkpoint")
@@ -96,6 +97,13 @@ def _resolve_task_config(task_id: str, args: SuperMimicTrainConfig):
     if args.model_only is not None or resume is None:
         enabled = not bool(args.model_only)
         cfg.runner.enable_control_updates = enabled
+    for name in RUNNER_RUNTIME_FIELDS:
+        value = getattr(args, name)
+        if value is not None:
+            setattr(cfg.runner, name, value)
+    for name in ("max_iterations", "save_interval", "log_interval"):
+        _integer(getattr(cfg.runner, name), 1, name)
+    ExecutionConfig(**{field.name: getattr(cfg.runner, field.name) for field in fields(ExecutionConfig)})
     _integer(cfg.env.num_envs, 2, "Task environment count")
     _integer(cfg.env.seed, 0, "Task seed")
     validate_config(cfg)
@@ -139,6 +147,7 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     """调用既有runner训练至目标轮次，周期保存模型和ONNX并返回独立产物目录。"""
     _validate_arguments(task_id, args)
     cfg, resume, source = _resolve_task_config(task_id, args)
+    runtime = cfg.runner
     device = _resolve_device(args.device)
     log_root = (Path(args.log_root).expanduser() / args.experiment_name).resolve()
     name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
@@ -150,8 +159,7 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     print(f"[INFO] Logging experiment in directory: {log_dir}", flush=True)
     print(f"[INFO] Training with: task={task_id}, device={device}, seed={cfg.env.seed}", flush=True)
     print(f"[INFO] Control updates enabled: {cfg.runner.enable_control_updates}", flush=True)
-    execution = ExecutionConfig(imag_microbatch=args.imag_microbatch, critic_microbatch=args.critic_microbatch,
-                                wm_compile=args.wm_compile, fused_adam=args.fused_adam)
+    execution = ExecutionConfig(**{field.name: getattr(runtime, field.name) for field in fields(ExecutionConfig)})
     print(f"[INFO] SuperMimic {cfg.algorithm} training: envs={cfg.env.num_envs}, "
           f"collect_avg={cfg.algo.collect_steps:g}, utd={1.0 / cfg.algo.collect_steps:g}, "
           f"wm_batch={cfg.algo.wm_batch}, imag_batch={cfg.algo.imag_batch}, "
@@ -181,13 +189,13 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
         if resume is not None:
             print(f"[INFO] Loading model checkpoint from: {resume}", flush=True)
             runner.load(resume, continue_run=args.continue_run, reset_critic=args.reset_critic)
-        target_iteration = args.max_iterations
+        target_iteration = runtime.max_iterations
         if target_iteration <= runner.iteration:
             raise ValueError(f"Target iteration {target_iteration} must exceed checkpoint iteration {runner.iteration}")
-        runner.configure_logging(target_iteration=target_iteration, log_interval=args.log_interval)
+        runner.configure_logging(target_iteration=target_iteration, log_interval=runtime.log_interval)
         while runner.iteration < target_iteration:
             remaining = target_iteration - runner.iteration
-            until_checkpoint = args.save_interval - runner.iteration % args.save_interval
+            until_checkpoint = runtime.save_interval - runner.iteration % runtime.save_interval
             runner.learn(min(remaining, until_checkpoint))
             # 参考在塌缩护栏首次预警时跳过该保存点，不发布可疑策略及其ONNX。
             if runner._collapse_strikes == 0:
