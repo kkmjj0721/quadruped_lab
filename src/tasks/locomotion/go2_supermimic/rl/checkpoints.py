@@ -13,7 +13,7 @@ from pathlib import Path
 
 import torch
 
-from agents.supermimic.config import RETIRED_DRIVER_SPEED_FIELDS, SuperMimicConfig
+from agents.supermimic.config import SuperMimicConfig
 from agents.supermimic.policy import make_actor
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
@@ -22,7 +22,7 @@ from ..go_supermimic_env_cfg import validate_config
 from ..mdp.reference_task import Go2ReferenceTaskModel
 from .runner import algorithm_config
 from ..config.loading import (
-    apply_settings, read_settings, configuration_for_settings, moe_checkpoint_settings,
+    apply_settings, read_settings, configuration_for_settings,
 )
 
 
@@ -60,7 +60,7 @@ def load_playback_source(task_id: str, checkpoint_file: str | Path) -> PlaybackS
         raise ValueError("Playback task terrain mode differs from the saved configuration")
     # 与训练保持相同的可信文件约定；只把所需策略装配到目标设备。
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_moe_v1":
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_moe_velocity_v1":
         raise ValueError("Incompatible SuperMimic checkpoint format")
     task_metadata = checkpoint.get("go2_task")
     if (not isinstance(task_metadata, dict) or not isinstance(task_metadata.get("curriculum"), dict)
@@ -83,23 +83,13 @@ def build_playback_policy(source: PlaybackSource, adapter) -> torch.nn.Module:
     if source.snapshot["geometry_hash"] != adapter.surface.geometry_hash:
         raise ValueError("Playback terrain geometry differs from the saved task")
     original_cfg = deepcopy(source.cfg)
-    # 退休速度只参与旧快照的原始指纹校验，不回写活动配置或新快照。
-    snapshot_cfg = source.snapshot["config"]
-    legacy_algo = {**snapshot_cfg.get("single", {}), **snapshot_cfg.get("algo", {})}
-    for name in RETIRED_DRIVER_SPEED_FIELDS:
-        if name in legacy_algo:
-            setattr(original_cfg.algo, name, legacy_algo[name])
-    legacy_driver = snapshot_cfg.get("runner", {}).get("driver", {})
-    for name in ("speed_min", "speed_max"):
-        if name in legacy_driver:
-            setattr(original_cfg.runner.driver, name, legacy_driver[name])
     original_task = Go2ReferenceTaskModel(original_cfg, adapter.task.default_joint_pos, adapter.task.joint_limits,
                                          adapter.surface, device=adapter.device)
     checkpoint = source.checkpoint
     if checkpoint["spec"] != asdict(original_task.spec) or checkpoint["spec_hash"] != original_task.spec.hash:
         raise ValueError("Checkpoint task spec does not match the saved configuration and current robot")
     policy_config = algorithm_config(source.cfg)
-    if asdict(SuperMimicConfig(**moe_checkpoint_settings(checkpoint["config"]))) != asdict(policy_config):
+    if asdict(SuperMimicConfig(**checkpoint["config"])) != asdict(policy_config):
         raise ValueError("SuperMimic checkpoint configuration mismatch")
     policy = make_actor(original_task.spec, policy_config,
                         observation_term_dims=original_task.observation_term_dims).to(adapter.device)

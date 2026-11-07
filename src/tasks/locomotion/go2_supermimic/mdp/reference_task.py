@@ -9,7 +9,7 @@ import math
 import torch
 from torch import Tensor
 
-from agents.supermimic.config import RUNNER_RUNTIME_FIELDS, exploration_semantics
+from agents.supermimic.config import RUNNER_RUNTIME_FIELDS
 from agents.supermimic.interfaces import AlgorithmSpec, TaskState
 
 from .reference_rewards import reference_reward_terms
@@ -18,7 +18,7 @@ from .gait_rewards import gait_phase
 from .reference_state import (
     ANGULAR_BODY, AUXILIARY, CONTACT_FOUND, CONTEXT_COM, FEET, FORCE_PHYSICAL_DIM, GRAVITY, HEIGHT, JOINT_OFFSET,
     JOINT_VELOCITY, LEGACY_PHYSICAL_DIM, LEG_PHYSICAL_DIM, PHYSICAL_DIM, POSE,
-    ROBOT_STATE, VELOCITY_HEADING, apply_pose_delta, body_planar_velocity, pose_delta, tracking_velocity, yaw_rotate_inverse,
+    ROBOT_STATE, VELOCITY_HEADING, apply_pose_delta, body_planar_velocity, body_vertical_velocity, pose_delta, tracking_velocity, yaw_rotate_inverse,
 )
 from .state_spec import (
     COMMAND_TIMER, CONTEXT_ENCODER_BIAS,
@@ -85,58 +85,13 @@ class Go2ReferenceTaskModel:
         self.spec = AlgorithmSpec(self.physical_dim, self.physical_dim, 12, sum(self.observation_term_dims),
                                   cfg.env.num_critic_obs, 26, MEMORY_DIM, 3,
                                   f"go2_reference_velocity_{version}:" + self.semantic_hash,
-                                  model_id="supermimic_moe_v1")
+                                  model_id="supermimic_moe_velocity_v1")
 
     def _semantic_config(self) -> dict:
-        """语义指纹沿用历史段名，使算法段改名前的检查点仍可续训与播放。
-
-        段名只是本项目的组织方式，不属于算法语义；改名不应让已有训练失效。
-        两段并存或都不存在时无法判断意图，直接报错而非静默算出另一个指纹。
-        """
+        """以当前任务配置建立语义指纹，运行时预算不改变任务定义。"""
         config = self.cfg.to_dict()
-        # 保存节奏和执行预算不改变任务定义，新增配置位置保留已有检查点指纹。
         config["runner"] = {name: value for name, value in config["runner"].items() if name not in RUNNER_RUNTIME_FIELDS}
-        # 关闭新增开关时省略键，完整旧快照仍使用原奖励／采集指纹。
-        if not config["reward"]["pose_tracking_gate"]:
-            del config["reward"]["pose_tracking_gate"]
-        if not config["runner"]["standing_zero_noise"]:
-            del config["runner"]["standing_zero_noise"]
-        for name in ("algo", "single"):
-            if name in config:
-                config[name] = exploration_semantics(config[name])
-        # 旧完整快照未声明角速度坐标，恢复heading后不改变原语义指纹。
-        if config["reward"]["body_ang_vel_frame"] == "heading":
-            del config["reward"]["body_ang_vel_frame"]
-        # 完整旧快照关闭本轮三项并恢复heading定义；新增参数不改变其既有指纹。
-        if not self.him_rewards:
-            for name in ("angular_momentum", "hip_pos", "soft_landing"):
-                del config["reward"]["scales"][name]
-            for name in ("hip_pos_command_threshold", "soft_landing_command_threshold"):
-                del config["reward"][name]
-            if config["reward"]["tracking_linear_frame"] == "heading":
-                del config["reward"]["tracking_linear_frame"]
-        # 旧45维任务关闭两项时保留既有指纹，新协议开关完整进入语义指纹。
-        if config["experiment"] == {"contact_source": "height", "actor_phase": False}:
-            del config["experiment"]
-        # 禁用新增项时保留旧快照的指纹，非零权重标识新任务语义。
-        for name in ("stand_still_joint_vel_l2", "is_terminated"):
-            if config["reward"]["scales"][name] == 0.0:
-                del config["reward"]["scales"][name]
-        # 历史v4／v5布局不含腿部接触力，读取边界关闭新奖励后保留原指纹。
-        if not self.leg_collision:
-            del config["reward"]["scales"]["leg_collision"]
-            del config["reward"]["leg_collision_force_threshold"]
-        # 完整旧快照由读取边界补零，保留97维协议及其原始语义指纹。
-        if not self.force_rewards:
-            del config["reward"]["scales"]["stumble"]
-            del config["reward"]["scales"]["joint_torques_l2"]
-            del config["reward"]["stumble_ratio"]
-        names = [name for name in ("algo", "single") if name in config]
-        if names == ["single"]:
-            return config
-        if names != ["algo"]:
-            raise ValueError(f"Task configuration must contain exactly one algorithm section, got {names or 'none'}")
-        return {("single" if name == "algo" else name): value for name, value in config.items()}
+        return config
 
     # ---------- 真实状态与坐标 ----------
 
@@ -184,6 +139,10 @@ class Go2ReferenceTaskModel:
 
     def yaw(self, state: TaskState) -> Tensor:
         return state.physical[:, 72]
+
+    def body_linear_velocity(self, state: TaskState) -> Tensor:
+        """从同一时刻真实状态恢复机身系xyz线速度，单位为m/s，不引入观测噪声。"""
+        return torch.cat((body_planar_velocity(state.physical), body_vertical_velocity(state.physical).unsqueeze(-1)), -1)
 
     def tracking_velocity(self, state: TaskState) -> Tensor:
         velocity = tracking_velocity(state.physical)
@@ -271,7 +230,7 @@ class Go2ReferenceTaskModel:
         return physical[:, HEIGHT] + base_ground[:, None] + feet[..., 2] - self.surface_height(xy)
 
     def advance(self, state: TaskState, action: Tensor, next_physical: Tensor, *, contact_times=None) -> TaskState:
-        """真实端读取子步计时；想象端使用受监督接触概率，旧快照保留足高近似。"""
+        """真实端读取子步计时；想象端默认使用受监督接触概率。"""
         clock = state.memory[:, ELAPSED_TIME] + self.dt
         command, timer, heading, standing, forward = advance_commands(self.cfg.commands, state, next_physical, self.dt)
         if contact_times is None:

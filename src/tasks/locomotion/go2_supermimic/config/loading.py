@@ -9,8 +9,6 @@ import json
 import math
 from pathlib import Path
 
-from agents.supermimic.config import checkpoint_policy_settings
-
 
 def _merge_mapping(defaults: dict, values: dict) -> dict:
     result = deepcopy(defaults)
@@ -76,63 +74,7 @@ def read_settings(path: Path) -> tuple[dict, bool]:
     settings = payload.get("config", payload)
     if not isinstance(settings, dict):
         raise ValueError("Task configuration snapshot must contain an object in config")
-    settings = _migrate_sections(settings)
-    wrapped = "config" in payload
-    complete_snapshot = wrapped and {"spec_hash", "geometry_hash"}.issubset(payload)
-    if complete_snapshot:
-        # 完整历史快照保留原奖励和采集定义；新训练及局部JSON使用主线新默认。
-        for section, name in (("reward", "pose_tracking_gate"), ("runner", "standing_zero_noise")):
-            values = settings.setdefault(section, {})
-            if isinstance(values, dict):
-                values.setdefault(name, False)
-        # 缺少该段的历史快照属于45维足高代理任务；局部新JSON沿用新训练默认。
-        settings.setdefault("experiment", {"contact_source": "height", "actor_phase": False})
-        if settings.get("algorithm", "moe_history") == "moe_history" and isinstance(settings.get("algo"), dict):
-            settings["algo"] = moe_checkpoint_settings(settings["algo"])
-        runner = settings.get("runner")
-        if isinstance(runner, dict) and isinstance(runner.get("driver"), dict):
-            # 旧追逐速度不再属于活动配置，完整快照仍可用于续训、播放与导出。
-            for name in ("speed_min", "speed_max"):
-                runner["driver"].pop(name, None)
-    reward = settings.get("reward")
-    if isinstance(reward, dict) and isinstance(reward.get("scales"), dict):
-        scales = reward["scales"]
-        if "foot_clearance" in scales:
-            weight = scales["foot_clearance"]
-            if isinstance(weight, bool) or not isinstance(weight, (int, float)) or weight != 0.0:
-                raise ValueError("Foot-clearance rewards are not supported by the mainline task; use the frozen experiment workspace")
-            if complete_snapshot:
-                # 已训练无足高实验的零项不参与数学定义，清理后仍保留原任务指纹。
-                del scales["foot_clearance"]
-                reward.pop("clearance", None)
-        if complete_snapshot:
-            # 完整旧快照缺失的新增奖励必须显式保留关闭状态，局部JSON沿用新默认。
-            for name in ("stand_still_joint_vel_l2", "stumble", "joint_torques_l2", "leg_collision",
-                         "angular_momentum", "hip_pos", "soft_landing", "is_terminated"):
-                scales.setdefault(name, 0.0)
-            # 旧速度任务使用heading平移；完整新快照已有显式坐标定义。
-            reward.setdefault("tracking_linear_frame", "heading")
-            reward.setdefault("body_ang_vel_frame", "heading")
-    return settings, wrapped
-
-
-def _migrate_sections(settings: dict) -> dict:
-    """把重构前的``single``算法段并回``algo``，使旧快照仍可续训与播放。
-
-    两段同时存在时属于手工合并的异常快照，以当前代码写出的``algo``为准，
-    旧段只作为缺省值，避免同一份快照被解释成两套预算。
-    """
-    if "single" not in settings:
-        return settings
-    migrated = deepcopy(settings)
-    legacy = migrated.pop("single")
-    if not isinstance(legacy, dict):
-        raise ValueError("Task configuration section single must be an object")
-    current = migrated.get("algo")
-    if current is not None and not isinstance(current, dict):
-        raise ValueError("Task configuration section algo must be an object")
-    migrated["algo"] = _merge_mapping(legacy, current or {})
-    return migrated
+    return settings, "config" in payload
 
 
 def configuration_for_settings(settings: dict | None = None):
@@ -143,14 +85,4 @@ def configuration_for_settings(settings: dict | None = None):
     algorithm = settings.get("algorithm", "moe_history")
     if algorithm != "moe_history":
         raise ValueError(f"Unsupported SuperMimic algorithm: {algorithm}")
-    cfg = Go2ReferenceCfg()
-    reward = settings.get("reward")
-    if isinstance(reward, dict) and isinstance(reward.get("scales"), dict) and "torso_sideways_lean" in reward["scales"]:
-        # 仅显式历史配置保留已删除奖励的声明，随后仍由统一覆盖入口校验权重。
-        cfg.reward.scales.torso_sideways_lean = 0.0
-    return cfg
-
-
-def moe_checkpoint_settings(settings: dict) -> dict:
-    """读取完整旧MoE固定方案配置，移除退休字段并拒绝已删除的探索方案。"""
-    return checkpoint_policy_settings({name: value for name, value in settings.items() if not name.startswith("him_")})
+    return Go2ReferenceCfg()

@@ -16,7 +16,7 @@ from agents.supermimic.export import export_policy
 from agents.supermimic.interfaces import AlgorithmSpec
 from agents.supermimic.policy import make_actor
 
-from ..config.loading import apply_settings, configuration_for_settings, moe_checkpoint_settings, read_settings
+from ..config.loading import apply_settings, configuration_for_settings, read_settings
 from ..mdp.reference_task import Go2ReferenceTaskModel
 from ..mdp.state_spec import JOINT_NAMES
 
@@ -53,10 +53,16 @@ def deployment_metadata(cfg, *, spec_hash: str, algorithm) -> dict:
                                   else "blind_proprioception_and_body_xy_world_yaw_command"),
         "history_encoder": {"type": "mixture_of_experts", "input": "five_frame_blind_history",
                             "latent_dim": int(algorithm.moe_latent_dim),
+                            "velocity_dim": 3, "encoded_dim": int(algorithm.moe_latent_dim) + 3,
+                            "latent_normalization": "l2_after_mixture", "velocity_normalization": "none",
                             "experts": int(algorithm.moe_expert_num),
                             "gate": "softmax_over_experts",
                             "current_frame_fused_with_latent": True},
-        "velocity_input": "not_observed_estimated_from_history",
+        "actor_input_dim": int(algorithm.moe_latent_dim) + 3 + width,
+        "actor_input_order": "latent_body_velocity_current_frame",
+        "velocity_input": "estimated_current_body_linear_velocity",
+        "velocity_estimation": {"dimension": 3, "frame": "body", "time": "current", "units": "m/s",
+                                "components": ["vx", "vy", "vz"], "supervision": "same_time_real_state_mse"},
         "gait_phase": {
             "observed": phase_enabled, "columns": [45, 46] if phase_enabled else [],
             "clock": "episode_elapsed_time", "period_seconds": cfg.reward.gait.period,
@@ -72,19 +78,23 @@ def deployment_metadata(cfg, *, spec_hash: str, algorithm) -> dict:
 
 def checkpoint_actor(checkpoint: dict):
     """只从检查点装配actor；部署不分任务策略之外的世界模型与critic。"""
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_moe_velocity_v1":
+        raise ValueError("Incompatible SuperMimic velocity-policy checkpoint format")
     if not isinstance(checkpoint.get("config"), dict) or not isinstance(checkpoint.get("spec"), dict):
         raise ValueError("Checkpoint is missing the algorithm configuration or task specification")
     if any(not torch.isfinite(value).all() for value in checkpoint["actor"].values()):
         raise ValueError("Checkpoint contains non-finite policy tensors")
     spec = AlgorithmSpec(**checkpoint["spec"])
-    if "format" in checkpoint and checkpoint["format"] != spec.model_id:
+    if not spec.semantic_id.startswith("go2_reference_velocity_"):
+        raise ValueError("Checkpoint does not describe a Go2 SuperMimic task")
+    if checkpoint["format"] != spec.model_id:
         raise ValueError("Checkpoint format differs from the policy model identifier")
-    algorithm = SuperMimicConfig(**moe_checkpoint_settings(checkpoint["config"]))
+    algorithm = SuperMimicConfig(**checkpoint["config"])
     if spec.observation_dim not in (45, 47):
         raise ValueError(f"Unsupported Go2 policy observation dimension: {spec.observation_dim}")
     if spec.history_length != 5:
         raise ValueError(f"Unsupported Go2 policy history length: {spec.history_length}")
-    # 旧策略保持45列，新策略只在末尾追加两列相位，离线装配不创建仿真器。
+    # 相位开关决定末尾两列；离线策略装配不创建仿真器。
     terms = Go2ReferenceTaskModel.observation_term_dims + ((2,) if spec.observation_dim == 47 else ())
     actor = make_actor(spec, algorithm, terms)
     actor.load_state_dict(checkpoint["actor"], strict=True)
@@ -97,7 +107,7 @@ def export_checkpoint(checkpoint_path: str | Path, directory: str | Path, *, ite
     if not path.is_file():
         raise FileNotFoundError(f"Checkpoint file not found: {path}")
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_moe_v1":
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_moe_velocity_v1":
         raise ValueError(f"Not a SuperMimic checkpoint: {path}")
     # 任务快照与播放共用同一份可信来源和同一套覆盖规则。
     snapshot_path = path.parent / "task_config.json"
