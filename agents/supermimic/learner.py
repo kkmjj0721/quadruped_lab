@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：更新物理模型，以想象回报优化动作并拟合价值目标。"""
+"""内容：拟合物理模型与价值目标，以想象回报和真实速度监督更新策略。"""
 
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -43,7 +43,7 @@ def _finite_metrics(metrics):
 
 class Learner:
     def __init__(self, task, actor, model, critic, config, execution=None):
-        self.actor, self.model, self.critic, self.config = actor, model, critic, config
+        self.task, self.actor, self.model, self.critic, self.config = task, actor, model, critic, config
         self.execution = ExecutionConfig(**asdict(execution if execution is not None else ExecutionConfig()))
         self.reset_policy_optimizers()
         # 关闭时沿用原默认自动选择foreach；显式False会改为单张量更新。
@@ -137,6 +137,7 @@ class Learner:
         self.critic_optimizer.zero_grad(set_to_none=True)
         feature_batches, target_batches = [], []
         metrics = {}
+        velocity_mse_axes = seed.history.new_zeros(3)
         with frozen(self.model, self.critic):
             for start in range(0, batch, self.execution.imag_microbatch):
                 end = min(start + self.execution.imag_microbatch, batch)
@@ -144,21 +145,31 @@ class Learner:
                 part = Seed(seed.state.index(slice(start, end)), seed.history[start:end])
                 data = self.imagination.rollout(part)
                 targets = self.imagination.lambda_returns(data)
-                loss = -data.objective.mean()
+                control_loss = -data.objective.mean()
+                _, velocity = self.actor.encode(part.history)
+                target_velocity = self.task.body_linear_velocity(part.state).detach()
+                velocity_error = (velocity - target_velocity).square()
+                velocity_loss = velocity_error.mean()
+                loss = control_loss + cfg.velocity_loss_coef * velocity_loss
                 (loss * weight).backward()
                 feature_batches.append(data.features[:, :-1].flatten(0, 1).detach())
                 target_batches.append(targets.flatten().detach())
-                values = {"control_loss": loss.detach(),
+                velocity_mse_axes += velocity_error.detach().mean(0) * weight
+                values = {"control_loss": control_loss.detach(), "velocity_loss": velocity_loss.detach(),
+                          "actor_loss": loss.detach(),
                           "imagination/survival_h": data.survival.detach().mean(),
                           "imagination/discounted_reward": data.discounted_reward.detach().mean(),
                           "imagination/bootstrap": data.bootstrap.detach().mean(),
                           "imagination/reward": data.rewards.mean()}
                 for name, value in values.items():
                     metrics[name] = metrics.get(name, 0) + value * weight
-                del data, targets, loss, values, part
+                del data, targets, loss, control_loss, velocity_loss, velocity_error, velocity, target_velocity, values, part
+            metrics["velocity_rmse"] = velocity_mse_axes.mean().sqrt()
+            for axis, value in zip(("x", "y", "z"), velocity_mse_axes.sqrt()):
+                metrics[f"velocity_rmse_{axis}"] = value
             parameters = self.actor.policy_parameters()
             gradient = clip_gradients(parameters, cfg.grad_clip, cfg.grad_clip_element)
-            finite = bool(torch.isfinite(gradient)) and bool(torch.isfinite(metrics["control_loss"]))
+            finite = bool(torch.isfinite(gradient)) and bool(torch.isfinite(metrics["actor_loss"]))
             if not finite:
                 self.nonfinite_steps += 1
             if not freeze_actor and finite:

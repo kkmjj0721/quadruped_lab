@@ -103,4 +103,4 @@ uv run --no-sync python -B -m unittest discover -s tests/test_agents -v
 
 ## SuperMimic 混合专家历史策略
 
-默认 Go2 任务使用 `agents.supermimic`：go2_rl_gym 的八专家历史编码器加 ELU 动作网络、SiLU 世界模型和短时域 BPTT。无教师或蒸馏，部署输入只有五帧本体历史，不含线速度；线速度由历史隐式估计。配置与训练、播放、验证入口统一见 [Go2任务说明](../docs/go2_supermimic.md)，来源与迁移差异见 [supermimic/NOTICE.md](supermimic/NOTICE.md)。
+默认 Go2 任务使用 `agents.supermimic`：go2_rl_gym 的八专家历史编码器加 ELU 动作网络、SiLU 世界模型和短时域 BPTT。无教师或蒸馏，部署只输入五帧本体历史；编码器输出32维潜特征和3维当前机身线速度估计，仅潜特征做L2归一化，速度由真实回放同一时刻真值监督。配置与训练、播放、验证入口统一见 [Go2任务说明](../docs/go2_supermimic.md)，来源与迁移差异见 [supermimic/NOTICE.md](supermimic/NOTICE.md)。

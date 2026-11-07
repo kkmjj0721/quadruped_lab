@@ -18,7 +18,12 @@ _SCALAR_GROUPS = {
     "wm_loss": "Loss/world_model",
     "critic_loss": "Loss/value",
     "control_loss": "Loss/control",
-    "control_task_loss": "Loss/control_task",
+    "velocity_loss": "Loss/velocity_estimation",
+    "actor_loss": "Loss/actor_total",
+    "velocity_rmse": "Metrics/velocity_estimation/rmse",
+    "velocity_rmse_x": "Metrics/velocity_estimation/rmse_x",
+    "velocity_rmse_y": "Metrics/velocity_estimation/rmse_y",
+    "velocity_rmse_z": "Metrics/velocity_estimation/rmse_z",
     "world_model_learning_rate": "Loss/world_model_learning_rate",
     "critic_learning_rate": "Loss/value_learning_rate",
     "control_learning_rate": "Loss/control_learning_rate",
@@ -98,6 +103,8 @@ def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -
         ("Mean world model loss", "wm_loss", model_available),
         ("Mean value loss", "critic_loss", control_available),
         ("Mean control loss", "control_loss", control_available),
+        ("Mean velocity estimation loss", "velocity_loss", control_available),
+        ("Mean total actor loss", "actor_loss", control_available),
     ):
         if available and key in values:
             lines.append(row(label, number(key)))
@@ -118,6 +125,8 @@ def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -
             lines.append(row(label, f"{math.sqrt(max(0, values[key])):.4f}"))
     if "task/action_rms" in values:
         lines.append(row("Metrics/action_rms", number("task/action_rms")))
+    if "velocity_rmse" in values:
+        lines.append(row("Metrics/velocity_estimation_rmse", number("velocity_rmse")))
     for key in values:
         if key.startswith("Reward_Rate/"):
             lines.append(row(key, number(key)))

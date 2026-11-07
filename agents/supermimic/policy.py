@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：提供混合专家历史策略及价值网络。"""
+"""内容：提供含当前机身线速度估计的混合专家历史策略及价值网络。"""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ from torch import Tensor, nn
 from .world_model import RunningNorm
 
 
-# ---------- 基础网络与MoE基线 ----------
+# ---------- 基础网络与混合专家 ----------
 
 class Mlp(nn.Module):
-    """与 go2_rl_gym 的 MLP 同名同层级，使专家权重可原样热启动。"""
+    """使用ELU隐藏层和线性输出层的前馈网络。"""
 
     def __init__(self, dims, last_activation=False):
         super().__init__()
@@ -31,7 +31,7 @@ class Mlp(nn.Module):
 
 
 class L2Norm(nn.Module):
-    """把专家输出投影到单位球面；对应 go2_rl_gym 的 norm_type='l2norm'。"""
+    """只把混合后的潜特征投影到单位球面。"""
 
     def forward(self, values: Tensor) -> Tensor:
         return F.normalize(values, p=2.0, dim=-1)
@@ -55,7 +55,7 @@ class Experts(nn.Module):
 
 
 class MoE(nn.Module):
-    """门控网络对专家输出加权求和，并返回门控权重供负载均衡监督。"""
+    """门控网络对全部专家的潜特征与速度输出使用同一组权重融合。"""
 
     def __init__(self, expert_num, input_dim, hidden_dims, output_dim):
         super().__init__()
@@ -70,23 +70,24 @@ class MoE(nn.Module):
 
 
 class StudentMoEEncoder(nn.Module):
-    """完整历史经共享骨干、分组专家和门控得到定长隐变量。"""
+    """历史融合后拆分潜特征与当前机身线速度，只归一化潜特征。"""
 
-    def __init__(self, expert_num, input_dim, hidden_dims, output_dim, output_normalization):
+    def __init__(self, expert_num, input_dim, hidden_dims, latent_dim):
         super().__init__()
-        self.moe = MoE(expert_num, input_dim, hidden_dims, output_dim)
-        self.normalization = output_normalization
+        self.latent_dim = latent_dim
+        self.moe = MoE(expert_num, input_dim, hidden_dims, latent_dim + 3)
+        self.normalization = L2Norm()
 
-    def forward(self, history: Tensor) -> tuple[Tensor, Tensor]:
-        latent, weights = self.moe(history)
-        return self.normalization(latent), weights
+    def forward(self, history: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        encoded, weights = self.moe(history)
+        return self.normalization(encoded[:, :self.latent_dim]), encoded[:, self.latent_dim:], weights
 
 
 class MoeActor(nn.Module):
-    """盲本体历史经混合专家编码为隐变量，再与当前帧拼接输出动作。
+    """盲本体历史编码为潜特征与机身线速度，再与当前帧拼接输出动作。
 
-    历史与当前帧使用两套独立归一化统计：历史统计喂给专家编码器，当前帧统计
-    只用于动作网络输入，与 go2_rl_gym 的 student 编码器和单帧归一化分工一致。
+    历史与当前帧使用两套独立归一化统计；速度保持m/s量纲，
+    与潜特征一同保留策略目标的梯度，并由真实状态提供速度监督。
     """
 
     def __init__(self, spec, config, observation_term_dims):
@@ -98,21 +99,23 @@ class MoeActor(nn.Module):
         self.observation_dim = spec.observation_dim
         self.history_length = spec.history_length
         self.action_dim = spec.action_dim
+        self.latent_dim = config.moe_latent_dim
+        self.velocity_dim = 3
         self.history_order = "frame_major_oldest_first"
-        self.input_order = "frame_major_oldest_first"
+        self.input_order = "latent_body_velocity_current_frame"
         self.normalizer = RunningNorm(self.observation_dim * self.history_length)
         self.frame_normalizer = RunningNorm(self.observation_dim)
         self.encoder = StudentMoEEncoder(
             config.moe_expert_num, self.observation_dim * self.history_length, tuple(config.moe_hidden),
-            config.moe_latent_dim, L2Norm())
-        self.actor = Mlp([config.moe_latent_dim + self.observation_dim, *config.actor_hidden, self.action_dim])
+            self.latent_dim)
+        self.actor = Mlp([self.latent_dim + self.velocity_dim + self.observation_dim, *config.actor_hidden, self.action_dim])
 
     def policy_normalizers(self):
         """导出与播放校验需要检查的归一化模块。"""
         return (self.normalizer, self.frame_normalizer)
 
     def policy_parameters(self):
-        """MoE基线仍由想象目标更新整个历史策略。"""
+        """想象目标与真实速度监督共同更新完整历史策略。"""
         return self.parameters()
 
     def framed(self, history: Tensor) -> Tensor:
@@ -130,58 +133,26 @@ class MoeActor(nn.Module):
         self.normalizer.update(self.flatten_history(history))
         self.frame_normalizer.update(history[:, -1])
 
-    def forward(self, history: Tensor) -> Tensor:
-        """导出的部署图只接收展平历史，因此这里只按展平历史解释输入。"""
+    @torch.jit.export
+    def encode(self, history: Tensor) -> tuple[Tensor, Tensor]:
+        """从包含当前帧的历史估计潜特征与同一时刻的机身xyz线速度。"""
         flattened = history.reshape(-1, self.observation_dim * self.history_length)
-        latent, _ = self.encoder(self.normalizer(flattened))
-        return self.actor(torch.cat((latent, self.frame_normalizer(flattened[:, -self.observation_dim:])), -1))
+        latent, velocity, _ = self.encoder(self.normalizer(flattened))
+        return latent, velocity
 
-    @torch.no_grad()
-    def load_pretrained(self, state_dict):
-        """按 go2_rl_gym 导出名的展平命名载入专家与动作网络，保留本地归一化统计。
-
-        导出的 TorchScript 把 MLP 的 network 容器展平，因此这里显式重建映射；
-        缺少或不匹配的张量直接报错，避免静默半载入。
-        """
-        def pairs(local_prefix, remote_prefix):
-            return {f"{local_prefix}.{kind}": f"{remote_prefix}.{kind}" for kind in ("weight", "bias")}
-
-        def linears(module):
-            return [index for index, layer in enumerate(module) if isinstance(layer, nn.Linear)]
-
-        mapping = {}
-        backbone = linears(self.encoder.moe.experts.backbone.network)
-        # 展平导出把骨干最后一层并入了 experts_hidden，其余线性层按序号一一对应。
-        for index in backbone[:-1]:
-            mapping.update(pairs(f"encoder.moe.experts.backbone.network.{index}",
-                                 f"student_moe_encoder.experts_backbone.{index}"))
-        mapping.update(pairs(f"encoder.moe.experts.backbone.network.{backbone[-1]}",
-                             "student_moe_encoder.experts_hidden.0"))
-        mapping.update(pairs("encoder.moe.experts.experts", "student_moe_encoder.experts_out"))
-        for index in linears(self.encoder.moe.gating_network[0].network):
-            mapping.update(pairs(f"encoder.moe.gating_network.0.network.{index}",
-                                 f"student_moe_encoder.gating_network.{index}"))
-        for index in linears(self.actor.network):
-            mapping.update(pairs(f"actor.network.{index}", f"actor.{index}"))
-        current = self.state_dict()
-        missing = set(mapping.values()) - set(state_dict)
-        if missing:
-            raise ValueError(f"Pretrained policy is missing tensors: {sorted(missing)}")
-        merged = dict(current)
-        for name, source in mapping.items():
-            value = state_dict[source]
-            if current[name].shape != value.shape:
-                raise ValueError(f"Pretrained tensor {source} has shape {tuple(value.shape)}, "
-                                 f"expected {tuple(current[name].shape)}")
-            merged[name] = value
-        self.load_state_dict(merged, strict=True)
+    def forward(self, history: Tensor) -> Tensor:
+        """部署仍只接收本体历史，真实速度不进入策略输入。"""
+        flattened = history.reshape(-1, self.observation_dim * self.history_length)
+        latent, velocity = self.encode(flattened)
+        current = self.frame_normalizer(flattened[:, -self.observation_dim:])
+        return self.actor(torch.cat((latent, velocity, current), -1))
 
 
 # ---------- 装配与价值网络 ----------
 
 def make_actor(spec, config, observation_term_dims=None):
     """按明确模型标识装配混合专家历史策略。"""
-    if spec.model_id == "supermimic_moe_v1":
+    if spec.model_id == "supermimic_moe_velocity_v1":
         return MoeActor(spec, config, observation_term_dims)
     raise ValueError(f"Unsupported policy model identifier: {spec.model_id}")
 

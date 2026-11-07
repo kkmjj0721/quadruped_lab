@@ -5,34 +5,8 @@ from dataclasses import dataclass
 import math
 
 
-RETIRED_EXPLORATION_FIELDS = ("exploration_mode", "policy_objective", "exploration_std_min", "exploration_std_max",
-                              "exploration_std_lr_scale", "exploration_entropy_coef",
-                              "explore_frac", "explore_noise", "explore_theta")
-RETIRED_DRIVER_SPEED_FIELDS = ("driver_vmin", "driver_vmax")
 RUNNER_RUNTIME_FIELDS = ("max_iterations", "save_interval", "log_interval", "imag_microbatch",
                          "critic_microbatch", "wm_compile", "fused_adam")
-
-
-def exploration_semantics(settings: dict) -> dict:
-    """保留固定方案的历史指纹结构，退休字段不再属于活动配置。"""
-    result = {name: value for name, value in settings.items() if name not in RETIRED_EXPLORATION_FIELDS}
-    # 仅保留历史hash序列化常量，不参与采集、想象或优化。
-    result.update(explore_frac=0.0, explore_noise=0.3, explore_theta=2.0)
-    if result.get("collect_det_frac", 0.0) == 0.0:
-        result.pop("collect_det_frac", None)
-    return result
-
-
-def checkpoint_policy_settings(settings: dict) -> dict:
-    """读取固定主线旧快照，移除退休参数；已移除的实验方案不能静默恢复。"""
-    if (settings.get("exploration_mode", "fixed") != "fixed"
-            or settings.get("policy_objective", "deterministic") != "deterministic"
-            or settings.get("explore_frac", 0.0) != 0.0):
-        raise ValueError("Only fixed Gaussian collection and deterministic imagination checkpoints are supported")
-    result = {name: value for name, value in settings.items()
-              if name not in RETIRED_EXPLORATION_FIELDS + RETIRED_DRIVER_SPEED_FIELDS}
-    result.setdefault("collect_det_frac", 0.0)
-    return result
 
 
 @dataclass
@@ -75,8 +49,9 @@ class SuperMimicConfig:
     actor_hidden: tuple[int, ...] = (512, 256, 128)
     critic_hidden: tuple[int, ...] = (512, 256, 128)
     moe_expert_num: int = 8
-    moe_hidden: tuple[int, ...] = (512, 256, 256)
+    moe_hidden: tuple[int, ...] = (512, 256, 128)
     moe_latent_dim: int = 32
+    velocity_loss_coef: float = 1.0  # 同时刻机身系xyz线速度MSE的权重，潜特征维度不包含这3维。
     learning_rate: float = 2e-4
     actor_lr_scale: float = 1.0
     actor_ramp_iterations: int = 1000
@@ -127,7 +102,7 @@ class SuperMimicConfig:
             raise ValueError("collect_det_frac must be finite and within [0,1]")
         if self.gamma == 1 or self.lr_final_frac == 0 or self.wm_prioritized_frac + self.wm_archive_frac > 1:
             raise ValueError("Invalid discount, final learning rate or replay fractions")
-        for name in ("learning_rate", "actor_lr_scale", "grad_clip", "grad_clip_element"):
+        for name in ("learning_rate", "actor_lr_scale", "grad_clip", "grad_clip_element", "velocity_loss_coef"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")

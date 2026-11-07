@@ -22,9 +22,13 @@ def _prepare_policy(actor, iteration, metadata):
         if (normalizer.var < 0).any() or normalizer.count <= 0:
             raise ValueError("Invalid policy normalization statistics")
     encoder = {"type": "moe", "experts": module.encoder.moe.experts.expert_num,
-               "latent_dim": module.encoder.moe.experts.output_dim, "gate_input": "normalized_history"}
+               "latent_dim": module.latent_dim, "velocity_dim": module.velocity_dim,
+               "output_dim": module.latent_dim + module.velocity_dim,
+               "gate_input": "normalized_history", "latent_normalization": "l2_after_mixture",
+               "velocity": {"frame": "body", "components": ["vx", "vy", "vz"], "units": "m/s",
+                            "time": "current", "normalization": "none"}}
     information = {
-        **(metadata or {}), "format": "supermimic_moe_policy_v1",
+        **(metadata or {}), "format": "supermimic_moe_velocity_policy_v1",
         "iteration": iteration,
         "input_name": "obs_history", "output_name": "actions", "dtype": "float32",
         "input_shape": [None, module.history_length * module.observation_dim],
@@ -35,6 +39,7 @@ def _prepare_policy(actor, iteration, metadata):
                           "formula": "clamp((x-mean)/(sqrt(var)+1e-6),-10,10)"},
         "action_semantics": "unscaled_joint_position_offsets", "action_transform": "identity",
         "actor_input_order": module.input_order,
+        "actor_input_dim": module.latent_dim + module.velocity_dim + module.observation_dim,
         "encoder": encoder,
     }
     return module, information

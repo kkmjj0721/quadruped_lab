@@ -17,7 +17,7 @@ import torch
 from .interfaces import append_history
 from .logging import TrainingLogger
 from .buffer import Replay, Window, WindowArchive
-from .config import ExecutionConfig, SuperMimicConfig, checkpoint_policy_settings
+from .config import ExecutionConfig, SuperMimicConfig
 from .exploration import stratified_collection_mask
 from .learner import Learner
 from .policy import Critic, make_actor
@@ -395,8 +395,8 @@ class SuperMimicRunner:
         data = torch.load(path, map_location=self.device, weights_only=False)
         if data.get("format") != self.spec.model_id:
             raise ValueError("SuperMimic checkpoint format or task specification mismatch")
-        saved_config = checkpoint_policy_settings(data["config"])
-        if continue_run and saved_config["collect_det_frac"] != self.config.collect_det_frac:
+        saved_config = SuperMimicConfig(**data["config"])
+        if continue_run and saved_config.collect_det_frac != self.config.collect_det_frac:
             raise ValueError("Deterministic collection fraction changed; use an explicit warm start")
         same = {}
         for name, checkpoint_key in (("actor", "actor"), ("critic", "critic"), ("model", "world_model")):
