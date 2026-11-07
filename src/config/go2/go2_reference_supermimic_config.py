@@ -29,7 +29,7 @@ class Go2ReferenceCfg(BaseConfig):
         wm_hidden: tuple[int, ...] = (2048, 2048, 2048)
         wm_window: int = 8
         wm_batch: int = 2048
-        wm_updates: int = 10
+        wm_updates: int = 5
         imag_batch: int = 4096
         horizon: int = 32
         gamma: float = 0.99
