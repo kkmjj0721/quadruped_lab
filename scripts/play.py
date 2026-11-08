@@ -32,7 +32,6 @@ from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 SUPERMIMIC_PREFIX = "Unitree-Go2-SuperMimic-"
-RI4438_SUPERMIMIC_PREFIX = "RI4438-SuperMimic-"
 
 
 @dataclass(frozen=True)
@@ -86,12 +85,6 @@ def run_viewer(env, policy, cfg: PlayConfig, device: str) -> None:
 
 def supermimic_task(task_id: str | None) -> bool:
     """SuperMimic 播放使用自己的检查点与历史适配，不进入PPO注册表。"""
-    if task_id is not None and task_id.startswith(RI4438_SUPERMIMIC_PREFIX):
-        from src.tasks.locomotion.ri_4438_supermimic.config.train_cfg import TASK_MODES
-
-        if task_id not in TASK_MODES:
-            raise ValueError(f"Unknown RI4438 SuperMimic task: {task_id}")
-        return True
     if task_id is None or not task_id.startswith(SUPERMIMIC_PREFIX):
         return False
     from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
@@ -115,10 +108,7 @@ def _resolve_checkpoint(cfg: PlayConfig) -> Path | None:
 
 def _run_supermimic(task_id: str, cfg: PlayConfig, checkpoint: Path | None, device: str) -> None:
     """只装配任务侧播放接口、可选录像和查看器。"""
-    if task_id.startswith(RI4438_SUPERMIMIC_PREFIX):
-        from src.tasks.locomotion.ri_4438_supermimic.rl.playback import make_playback_env
-    else:
-        from src.tasks.locomotion.go2_supermimic.rl.playback import make_playback_env
+    from src.tasks.locomotion.go2_supermimic.rl.playback import make_playback_env
 
     env, policy = make_playback_env(
         task_id, checkpoint_file=checkpoint, agent=cfg.agent, num_envs=cfg.num_envs, device=device,
@@ -212,12 +202,11 @@ def main() -> None:
     tasks = list_tasks()
     if len(sys.argv) == 1 or sys.argv[1] in ("-h", "--help"):
         from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
-        from src.tasks.locomotion.ri_4438_supermimic.config.train_cfg import TASK_MODES as RI4438_TASK_MODES
 
         print(f"usage: {sys.argv[0]} TASK [OPTIONS]")
         print(f"Run '{sys.argv[0]} TASK --help' for playback options.")
         print("Available tasks:")
-        for task in sorted(set(tasks) | set(TASK_MODES) | set(RI4438_TASK_MODES)):
+        for task in sorted(set(tasks) | set(TASK_MODES)):
             print(f"  {task}")
         return
 

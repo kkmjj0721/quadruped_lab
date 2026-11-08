@@ -35,7 +35,6 @@ from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 
 SUPERMIMIC_PREFIX = "Unitree-Go2-SuperMimic-"
-RI4438_SUPERMIMIC_PREFIX = "RI4438-SuperMimic-"
 
 
 @dataclass(frozen=True)
@@ -198,12 +197,6 @@ def launch_training(task_id: str, args: TrainConfig | None = None) -> None:
 
 def supermimic_task(task_id: str | None) -> bool:
     """SuperMimic 任务使用自己的参数、装配与产物目录，不进入PPO注册表。"""
-    if task_id is not None and task_id.startswith(RI4438_SUPERMIMIC_PREFIX):
-        from src.tasks.locomotion.ri_4438_supermimic.config.train_cfg import TASK_MODES
-
-        if task_id not in TASK_MODES:
-            raise ValueError(f"Unknown RI4438 SuperMimic task: {task_id}")
-        return True
     if task_id is None or not task_id.startswith(SUPERMIMIC_PREFIX):
         return False
     from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
@@ -217,10 +210,7 @@ def main() -> None:
     """先解析任务 ID，再根据该任务配置解析命令行覆盖。"""
     # 提前读取任务ID，避免任何分支都导入PPO注册表。
     if supermimic_task(sys.argv[1] if len(sys.argv) > 1 else None):
-        if sys.argv[1].startswith(RI4438_SUPERMIMIC_PREFIX):
-            from src.tasks.locomotion.ri_4438_supermimic.cli import train_main
-        else:
-            from src.tasks.locomotion.go2_supermimic.cli import train_main
+        from src.tasks.locomotion.go2_supermimic.cli import train_main
 
         train_main(sys.argv[1], sys.argv[2:])
         return
@@ -232,11 +222,10 @@ def main() -> None:
     tasks = list_tasks()
     if len(sys.argv) == 1 or sys.argv[1] in {"-h", "--help"}:
         from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
-        from src.tasks.locomotion.ri_4438_supermimic.config.train_cfg import TASK_MODES as RI4438_TASK_MODES
 
         print(f"usage: {sys.argv[0]} <TASK> [OPTIONS]")
         print(f"Run '{sys.argv[0]} <TASK> --help' for task-specific options.")
-        print("Available tasks:\n  " + "\n  ".join(sorted([*tasks, *TASK_MODES, *RI4438_TASK_MODES])))
+        print("Available tasks:\n  " + "\n  ".join(sorted([*tasks, *TASK_MODES])))
         return
     task_id, remaining_args = tyro.cli(
         tyro.extras.literal_type_from_choices(tasks),
