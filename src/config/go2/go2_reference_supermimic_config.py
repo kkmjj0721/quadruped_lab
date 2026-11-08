@@ -40,7 +40,8 @@ class Go2ReferenceCfg(BaseConfig):
         critic_hidden: tuple[int, ...] = (512, 256, 128)
         moe_expert_num: int = 8
         moe_hidden: tuple[int, ...] = (512, 256, 128)
-        moe_latent_dim: int = 32
+        moe_latent_dim: int = 32  # 另附3维当前机身线速度，不参与潜特征L2归一化。
+        velocity_loss_coef: float = 1.0  # 真实同一时刻机身线速度的MSE监督权重。
 
         # ---------- 优化与排期 ----------
         learning_rate: float = 2e-4
@@ -82,9 +83,9 @@ class Go2ReferenceCfg(BaseConfig):
         num_critic_obs = 262
 
     class experiment:
-        """步态协议；段名沿用已验证策略快照，旧配置在读取边界恢复原开关。"""
+        """声明步态相位观测与想象端接触来源。"""
 
-        contact_source = "model"  # 想象端使用受监督接触概率；height仅用于旧快照。
+        contact_source = "model"  # 想象端默认使用受监督接触概率；height可显式选择足高近似对照。
         actor_phase = True  # 原45维末尾追加sin／cos，相位与步态奖励共用时钟。
 
     class sim:
@@ -235,7 +236,7 @@ class Go2ReferenceCfg(BaseConfig):
         """机体系平移及指定HIM奖励；各项先返回奖励率。"""
 
         tracking_linear_frame = "body"
-        body_ang_vel_frame = "body"  # 新训练按HIM约束机体系xy角速度；旧完整快照保留heading。
+        body_ang_vel_frame = "body"  # 默认按HIM约束机身系xy角速度；heading可显式用于对照。
         tracking_linear_variance = 0.25
         tracking_angular_variance = 0.25
         pose_tracking_gate = True  # 移动时以实际速度跟踪门控姿态奖励；站立保留原评分。

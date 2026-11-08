@@ -5,5 +5,6 @@
 """
 
 from .config import BLIND_TERRAIN_NAMES, make_blind_terrain_cfg
+from .vision import VISION_TERRAIN_NAMES, make_vision_terrain_cfg
 
-__all__ = ["BLIND_TERRAIN_NAMES", "make_blind_terrain_cfg"]
+__all__ = ["BLIND_TERRAIN_NAMES", "make_blind_terrain_cfg", "VISION_TERRAIN_NAMES", "make_vision_terrain_cfg"]
