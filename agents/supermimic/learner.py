@@ -200,7 +200,8 @@ class Learner:
         """沿用当前融合执行选项，加载原步数、动量和其余优化器参数。"""
         # 必须在加载前覆盖：PyTorch据此把fused Adam的step张量放到参数设备。
         fused = True if self.execution.fused_adam else None
-        state = {**data, "param_groups": [{**group, "fused": fused} for group in data["param_groups"]]}
+        state = {**data, "param_groups": [{**group, "fused": fused, "capturable": False,
+                                          "lr": float(group["lr"])} for group in data["param_groups"]]}
         getattr(self, name + "_optimizer").load_state_dict(state)
 
     def load_state_dict(self, data):

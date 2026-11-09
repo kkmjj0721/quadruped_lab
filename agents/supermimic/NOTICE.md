@@ -8,6 +8,10 @@
 
 各机器人在`src/config/<机器人>/*supermimic_config.py`的`algo`与`runner`段声明实际训练配方；本目录只维护共享字段定义、通用默认、校验与算法实现。CLI显式覆盖已加载配置，新增运行预算不进入任务语义指纹。
 
+CUDA更新执行方式维护在`cuda_graph.py`，由本项目已有独立性能实验迁入。工程依据实读 [BlinkMimic@d264658](https://github.com/fuyichen0725/blinkmimic/blob/d264658d6c9ce61fb52f9f0f8985a369f3ccc409/src/blinkmimic/train.py#L403) 的 `Graphed`、设备学习率及可捕获Adam，以及 [InstantTrack@b9512a9](https://github.com/Huy-Quang-Dao/instantTrack/blob/b9512a96d4e82e6ddea9a6de3b03276888bbcb2c/src/instanttrack/train.py#L455) 的预热与独立捕获流。保留本项目图外采样、归一化校验、全部优化器的非有限梯度跳步、速度监督和护栏，不迁入参考项目的G1任务、Muon、EMA、精度或训练配方。默认CUDA开启、CPU使用原执行方式；可用`--cuda-graph False`关闭，配置和限制见[Go2任务说明](../../docs/go2_supermimic.md)。
+
+[XMimic@8f7693f](https://github.com/nico-bohlinger/xmimic/blob/8f7693f96ca02c49f11dcc98cd14cf03f45df2fa/xmimic/algorithm.py#L465) 使用JAX的`jit/lax.scan`整体迭代编译，提供减少Python调度的工程参照，不作为本项目PyTorch更新图的直接实现。InstantTrack的异步世界模型／critic更新会改变读取网络的时序，本次不采用；参考项目的速度和效果不代表本项目已经复现。
+
 `supermimic_moe_velocity_v1` 按用户确认的 Go2 盲（本体感知）速度跟踪路线实现：算法沿用 SuperMimic，actor 采用 `go2_rl_gym` 的混合专家网络，其余训练机制对齐指定参考实现。
 
 - 训练机制参考 [Zhengtianjin/go2-supermimic](https://github.com/Zhengtianjin/go2-supermimic/tree/d9eee9b3f248e5300e636c433255db2c1c3e086a)，已实读固定提交的 `supermimic/{train,world_model,state,buffer,imagine,driver}.py`。本目录按职责平铺对应模块：`world_model.py`（`RunningNorm`／`WorldModel`）、`policy.py`（混合专家 actor 与 critic）、`buffer.py`、`imagine.py`、`learner.py`、`runner.py`；驱动器装配留在任务侧 `src/tasks/locomotion/go2_supermimic/rl/driver.py`。

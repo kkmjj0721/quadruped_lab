@@ -6,7 +6,7 @@ import math
 
 
 RUNNER_RUNTIME_FIELDS = ("max_iterations", "save_interval", "log_interval", "imag_microbatch",
-                         "critic_microbatch", "wm_compile", "fused_adam")
+                         "critic_microbatch", "wm_compile", "fused_adam", "cuda_graph")
 
 
 @dataclass
@@ -17,13 +17,14 @@ class ExecutionConfig:
     critic_microbatch: int = 32768
     wm_compile: bool = True
     fused_adam: bool = True
+    cuda_graph: bool = True  # CUDA默认捕获更新；CPU由runner解析为False。
 
     def __post_init__(self):
         for name in ("imag_microbatch", "critic_microbatch"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("wm_compile", "fused_adam"):
+        for name in ("wm_compile", "fused_adam", "cuda_graph"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean")
 

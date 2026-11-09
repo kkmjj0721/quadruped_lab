@@ -63,6 +63,9 @@ class SuperMimicRunner:
         self.device = torch.device(env.device)
         self.config = SuperMimicConfig(**asdict(config))
         self.execution = ExecutionConfig(**asdict(execution)) if execution is not None else ExecutionConfig()
+        self.execution.cuda_graph = self.execution.cuda_graph and self.device.type == "cuda"
+        if self.execution.cuda_graph and not self.execution.fused_adam:
+            raise ValueError("CUDA-graph updates require fused Adam; disable cuda_graph to use non-fused Adam")
         cfg = self.config
         if not math.isfinite(self.task.dt) or self.task.dt <= 0:
             raise ValueError("Task control timestep must be finite and positive")
@@ -80,7 +83,7 @@ class SuperMimicRunner:
         self.model = self._make_world_model().to(self.device)
         self.model.configure_supervised_compile(enabled=self.execution.wm_compile, backend=cfg.compile_backend)
         self.critic = Critic(self.spec.privileged_dim, cfg.critic_hidden).to(self.device)
-        self.learner = Learner(self.task, self.actor, self.model, self.critic, cfg, execution=self.execution)
+        self.learner = self._make_learner()
         self.replay = Replay(self.spec, env.num_envs, cfg.replay_capacity, self.device)
         self.archive = WindowArchive(cfg.archive_size)
         self.control_enabled = bool(control_enabled)
@@ -108,6 +111,15 @@ class SuperMimicRunner:
     def _make_world_model(self):
         """默认使用通用状态模型；任务子类可指定其输出统计语义。"""
         return WorldModel(self.task, self.config.wm_hidden)
+
+    def _make_learner(self):
+        """初始化与恢复共用执行选择，CPU保持原学习器。"""
+        learner_type = Learner
+        if self.execution.cuda_graph:
+            from .cuda_graph import CudaGraphLearner
+
+            learner_type = CudaGraphLearner
+        return learner_type(self.task, self.actor, self.model, self.critic, self.config, execution=self.execution)
 
     def configure_logging(self, *, target_iteration, log_interval=1):
         if target_iteration < self.iteration or log_interval < 1:
@@ -419,7 +431,7 @@ class SuperMimicRunner:
         same["critic"] = same["critic"] and not reset_critic
         if same["critic"]:
             self.critic.load_state_dict(data["critic"])
-        self.learner = Learner(self.task, self.actor, self.model, self.critic, self.config, execution=self.execution)
+        self.learner = self._make_learner()
         for name in ("actor", "model", "critic"):
             if same[name] and name in saved_learner:
                 self.learner.load_optimizer_state_dict(name, saved_learner[name])

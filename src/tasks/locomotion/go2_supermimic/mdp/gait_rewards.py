@@ -3,7 +3,7 @@
 
 import torch
 
-from .state_spec import AIR_TIME, CONTACT, CONTACT_TIME, ELAPSED_TIME, FOOT_NAMES
+from .state_spec import AIR_TIME, CONTACT, CONTACT_TIME, ELAPSED_TIME
 
 
 def gait_phase(state, dt, period):
@@ -16,7 +16,7 @@ def gait_reward_terms(task, state, next_state):
     """二值接触严格等于来源；概率接触按逐脚期望匹配及连续计时近似。"""
     cfg = task.cfg.reward.gait
     phase = gait_phase(next_state, task.dt, cfg.period)
-    offsets = phase.new_tensor([cfg.offsets[name] for name in FOOT_NAMES])
+    offsets = task.gait_offsets
     desired = ((phase[:, None] + offsets) % 1.0 < cfg.stance_fraction).to(phase.dtype)
     contact = next_state.memory[:, CONTACT]
     active = (state.command[:, :2].norm(dim=-1) + state.command[:, 2].abs() > cfg.command_threshold).to(phase.dtype)

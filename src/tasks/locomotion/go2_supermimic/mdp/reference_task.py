@@ -53,6 +53,7 @@ class Go2ReferenceTaskModel:
         self.posture_std = torch.tensor(
             [[getattr(cfg.reward.posture, name)[joint.split("_")[1]] for joint in JOINT_NAMES]
              for name in ("std_standing", "std_walking", "std_running")], device=self.device)
+        self.gait_offsets = self.default_joint_pos.new_tensor([cfg.reward.gait.offsets[name] for name in FOOT_NAMES])
         if self.default_joint_pos.shape != (12,) or self.joint_limits.shape != (12, 2):
             raise ValueError("Reference Go2 joint definitions must have shapes [12] and [12,2]")
         if not torch.isfinite(self.default_joint_pos).all() or not torch.isfinite(self.joint_limits).all():

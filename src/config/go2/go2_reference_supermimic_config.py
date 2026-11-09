@@ -141,6 +141,7 @@ class Go2ReferenceCfg(BaseConfig):
         critic_microbatch = 32768
         wm_compile = True
         fused_adam = True
+        cuda_graph = True  # CUDA默认捕获模型、actor和critic更新；CPU使用原执行方式。
         enable_control_updates = True
         standing_zero_noise = True  # 站立命令采集关闭额外动作噪声，保留固定无噪声组。
 

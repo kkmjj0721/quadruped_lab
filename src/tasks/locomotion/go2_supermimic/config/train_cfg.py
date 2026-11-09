@@ -38,6 +38,8 @@ class SuperMimicTrainConfig:
     """覆盖世界模型监督核心的编译开关；后端沿用algo.compile_backend。"""
     fused_adam: bool | None = None
     """覆盖全部优化器及护栏重建的fused Adam开关；未指定时沿用runner配置。"""
+    cuda_graph: bool | None = None
+    """覆盖CUDA更新图开关；CUDA默认启用且需要fused Adam，CPU使用原执行方式。"""
     log_root: str = "logs/supermimic"
     experiment_name: str = "go2_supermimic"
     run_name: str = ""

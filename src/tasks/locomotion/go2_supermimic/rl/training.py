@@ -160,13 +160,15 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     print(f"[INFO] Training with: task={task_id}, device={device}, seed={cfg.env.seed}", flush=True)
     print(f"[INFO] Control updates enabled: {cfg.runner.enable_control_updates}", flush=True)
     execution = ExecutionConfig(**{field.name: getattr(runtime, field.name) for field in fields(ExecutionConfig)})
+    runner = make_go2_supermimic_runner(cfg, device=device, log_dir=log_dir, execution=execution)
+    execution = runner.execution
     print(f"[INFO] SuperMimic {cfg.algorithm} training: envs={cfg.env.num_envs}, "
           f"collect_avg={cfg.algo.collect_steps:g}, utd={1.0 / cfg.algo.collect_steps:g}, "
           f"wm_batch={cfg.algo.wm_batch}, imag_batch={cfg.algo.imag_batch}, "
           f"replay={cfg.algo.replay_capacity}, compile={cfg.algo.compile_imagination}, "
           f"imag_microbatch={execution.imag_microbatch}, critic_microbatch={execution.critic_microbatch}, "
-          f"wm_compile={execution.wm_compile}, fused_adam={execution.fused_adam}", flush=True)
-    runner = make_go2_supermimic_runner(cfg, device=device, log_dir=log_dir, execution=execution)
+          f"wm_compile={execution.wm_compile}, fused_adam={execution.fused_adam}, "
+          f"cuda_graph={execution.cuda_graph}", flush=True)
     try:
         # 快照反映JSON与CLI覆盖后的实际配置，普通YAML类型便于直接查看和安全回读。
         origin = json.loads(json.dumps(_run_origin(task_id, args, device, resume, source), default=str))
