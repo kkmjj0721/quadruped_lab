@@ -35,7 +35,7 @@ class SuperMimicTrainConfig:
     critic_microbatch: int | None = None
     """覆盖单次critic反传的样本数上限；未指定时沿用runner配置。"""
     wm_compile: bool | None = None
-    """覆盖世界模型监督核心的编译开关；后端沿用algo.compile_backend。"""
+    """覆盖完整世界模型监督及损失的编译开关；后端沿用algo.compile_backend。"""
     fused_adam: bool | None = None
     """覆盖全部优化器及护栏重建的fused Adam开关；未指定时沿用runner配置。"""
     cuda_graph: bool | None = None

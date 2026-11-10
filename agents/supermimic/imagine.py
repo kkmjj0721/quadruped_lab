@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：编译可微想象单步，保留末端价值导数并生成固定 lambda-return。"""
+"""内容：编译可微想象单步与完整返回递推，保留末端价值导数及固定目标。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
+from .compilation import compile_kernel
 from .interfaces import TaskState, append_history
 
 
@@ -28,6 +29,8 @@ class Imagination:
         self.task, self.actor, self.model, self.critic, self.config = task, actor, model, critic, config
         self.step = (torch.compile(self._step, backend=config.compile_backend, dynamic=False)
                      if config.compile_imagination else self._step)
+        self._return_kernel = (compile_kernel(self._lambda_returns, config.compile_backend)
+                               if config.compile_imagination else self._lambda_returns)
 
     def _step(self, state: TaskState, history: Tensor):
         action = self.actor(history)
@@ -63,6 +66,10 @@ class Imagination:
 
     @torch.no_grad()
     def lambda_returns(self, data: ImaginedData) -> Tensor:
+        return self._return_kernel(data)
+
+    @torch.no_grad()
+    def _lambda_returns(self, data: ImaginedData) -> Tensor:
         """固定价值快照；按参考对累计存活做比值，保留其低存活数值语义。"""
         values = self.critic(data.features)
         targets = torch.empty_like(data.rewards)

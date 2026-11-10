@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import fields, is_dataclass
+import gc
 
 import torch
 
@@ -12,6 +14,18 @@ from .learner import Learner, _finite_metrics, clip_gradients, frozen
 
 
 # ---------- 静态输入与实际更新预热 ----------
+
+@contextmanager
+def _capture_without_gc():
+    """仅捕获期间暂停循环回收，避免析构Triton内核；始终恢复原开关。"""
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
+
 
 def _clone_inputs(value):
     """为图输入保留独立存储；递归保持 Window、Seed 和 TaskState 的协议。"""
@@ -69,9 +83,10 @@ class CapturedUpdate:
                 return outputs
             if self.graph is None:
                 torch.cuda.synchronize(self.device)
-                self.graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(self.graph, stream=self.stream):
-                    self.outputs = self.function(*self.inputs)
+                with _capture_without_gc():
+                    self.graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(self.graph, stream=self.stream):
+                        self.outputs = self.function(*self.inputs)
                 # 捕获只记录 CUDA 工作；下面这次 replay 才是本次实际更新。
                 print(f"[INFO] Captured CUDA update graph: {self.function.__name__}", flush=True)
             self.graph.replay()
@@ -214,7 +229,7 @@ class CudaGraphLearner(Learner):
                 optimizer.zero_grad(set_to_none=True)
                 value_loss = features.new_zeros(())
                 for part in selected.split(self.execution.critic_microbatch):
-                    partial_loss = (self.critic(features[part]) - targets[part]).square().mean()
+                    partial_loss = self.critic_loss_kernel(features[part], targets[part])
                     weighted_loss = partial_loss * (part.numel() / selected.numel())
                     weighted_loss.backward()
                     value_loss += weighted_loss.detach()

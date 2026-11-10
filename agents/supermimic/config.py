@@ -15,7 +15,7 @@ class ExecutionConfig:
 
     imag_microbatch: int = 4096
     critic_microbatch: int = 32768
-    wm_compile: bool = True
+    wm_compile: bool = True  # 完整自回归监督及损失。
     fused_adam: bool = True
     cuda_graph: bool = True  # CUDA默认捕获更新；CPU由runner解析为False。
 
@@ -62,7 +62,7 @@ class SuperMimicConfig:
     critic_minibatches: int = 4
     grad_clip: float = 1.0
     grad_clip_element: float = 0.1
-    compile_imagination: bool = True
+    compile_imagination: bool = True  # 想象单步、完整lambda-return及critic损失。
     compile_backend: str = "inductor"
     # 论文表A.5：仅真实采集时逐步逐维独立添加固定高斯噪声，单位为动作缩放前单位。
     action_noise: float = 0.1

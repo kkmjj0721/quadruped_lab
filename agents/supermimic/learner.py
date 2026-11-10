@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from .buffer import Seed
+from .compilation import compile_kernel
 from .config import ExecutionConfig
 from .imagine import Imagination
 
@@ -50,6 +51,8 @@ class Learner:
         fused = True if self.execution.fused_adam else None
         self.model_optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, fused=fused)
         self.imagination = Imagination(task, actor, model, critic, config)
+        self.critic_loss_kernel = (compile_kernel(self._critic_loss, config.compile_backend)
+                                   if config.compile_imagination else self._critic_loss)
         self.actor_updates = 0
         self.model_updates = 0
         self.critic_updates = 0
@@ -95,6 +98,9 @@ class Learner:
         return _finite_metrics({"wm_loss": loss.detach(), "wm_grad_norm": gradient.detach(),
                                 "wm_valid_steps": window.valid.sum(), "wm_skipped": float(not finite)})
 
+    def _critic_loss(self, features, targets):
+        return (self.critic(features) - targets).square().mean()
+
     def _fit_critic(self, features, targets):
         """以固定想象目标拟合价值网络，保留尾批与分批累积语义。"""
         cfg = self.config
@@ -113,7 +119,7 @@ class Learner:
                 optimizer.zero_grad(set_to_none=True)
                 value_loss = features.new_zeros(())
                 for part in selected.split(self.execution.critic_microbatch):
-                    partial_loss = (critic(features[part]) - targets[part]).square().mean()
+                    partial_loss = self.critic_loss_kernel(features[part], targets[part])
                     weighted_loss = partial_loss * (part.numel() / selected.numel())
                     weighted_loss.backward()
                     value_loss += weighted_loss.detach()
