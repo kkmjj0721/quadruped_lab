@@ -10,7 +10,7 @@ import gc
 import torch
 
 from .buffer import Seed
-from .learner import Learner, _finite_metrics, clip_gradients, frozen
+from .learner import Learner, _step_if_finite, clip_gradients, frozen
 
 
 # ---------- 静态输入与实际更新预热 ----------
@@ -100,15 +100,6 @@ def _capturable_adam(parameters, rate, *, betas=(0.9, 0.999)):
                             betas=betas, fused=True, capturable=True)
 
 
-def _step_if_finite(optimizer, finite):
-    """fused Adam 在设备上跳过参数、动量与步数，保持原有限梯度保护。"""
-    optimizer.found_inf = (~finite).float()
-    try:
-        optimizer.step()
-    finally:
-        optimizer.found_inf = None
-
-
 # ---------- 可捕获更新 ----------
 
 class CudaGraphLearner(Learner):
@@ -167,14 +158,13 @@ class CudaGraphLearner(Learner):
         return loss.detach(), gradient.detach(), window.valid.sum(), finite
 
     def fit_model(self, window):
-        loss, gradient, valid, flag = self._model_update(window)
-        finite = bool(flag)
-        self.model_updates += int(finite)
-        self.nonfinite_steps += int(not finite)
-        return _finite_metrics({"wm_loss": loss.clone(), "wm_grad_norm": gradient.clone(),
-                                "wm_valid_steps": valid.clone(), "wm_skipped": float(not finite),
-                                "cuda_graph/model_captured": float(self._model_update.graph is not None),
-                                "cuda_graph/model_replays": self._model_update.replays})
+        loss, gradient, valid, finite = self._model_update(window)
+        self.model_updates.add_(finite)
+        self.nonfinite_steps.add_(~finite)
+        return {"wm_loss": loss.clone(), "wm_grad_norm": gradient.clone(),
+                "wm_valid_steps": valid.clone(), "wm_skipped": (~finite).float(),
+                "cuda_graph/model_captured": float(self._model_update.graph is not None),
+                "cuda_graph/model_replays": self._model_update.replays}
 
     def _actor_core(self, seed, *, freeze_actor):
         cfg, batch = self.config, seed.history.shape[0]
@@ -249,10 +239,10 @@ class CudaGraphLearner(Learner):
             self._actor_updates[freeze_actor] = CapturedUpdate(
                 lambda value: self._actor_core(value, freeze_actor=freeze_actor), self.device)
         actor_update = self._actor_updates[freeze_actor]
-        metrics, features, targets, flag = actor_update(seed)
-        finite = bool(flag)
-        self.nonfinite_steps += int(not finite)
-        self.actor_updates += int(finite and not freeze_actor)
+        metrics, features, targets, finite = actor_update(seed)
+        self.nonfinite_steps.add_(~finite)
+        if not freeze_actor:
+            self.actor_updates.add_(finite)
         # 归一化统计和原有输入有限性校验留在图外，时序与主线一致。
         self.critic.normalizer.update(features)
         minibatch = features.shape[0] // self.config.critic_minibatches
@@ -261,18 +251,17 @@ class CudaGraphLearner(Learner):
         if self._critic_update is None:
             self._critic_update = CapturedUpdate(self._critic_core, self.device)
         value_loss, count = self._critic_update(features, targets)
-        updates = int(count)
-        skipped = self.config.critic_epochs * self.config.critic_minibatches - updates
-        self.critic_updates += updates
+        skipped = self.config.critic_epochs * self.config.critic_minibatches - count
+        self.critic_updates.add_(count)
         result = {name: value.clone() for name, value in metrics.items()}
-        result.update({"critic_loss": value_loss.clone(), "control_skipped": float(not finite),
+        result.update({"critic_loss": value_loss.clone(), "control_skipped": (~finite).float(),
                        "critic_skipped": skipped, "control_learning_rate": self.actor_optimizer.param_groups[0]["lr"].clone(),
                        "execution/imag_batch": batch,
                        "execution/imag_microbatch": min(batch, self.execution.imag_microbatch),
                        "execution/critic_microbatch": min(self.execution.critic_microbatch, minibatch),
-                       "nonfinite_steps": self.nonfinite_steps,
+                       "nonfinite_steps": self.nonfinite_steps.clone(),
                        "cuda_graph/actor_captured": float(actor_update.graph is not None),
                        "cuda_graph/actor_replays": actor_update.replays,
                        "cuda_graph/critic_captured": float(self._critic_update.graph is not None),
                        "cuda_graph/critic_replays": self._critic_update.replays})
-        return _finite_metrics(result)
+        return result

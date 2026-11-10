@@ -37,15 +37,25 @@ def clip_gradients(parameters, norm: float, element: float | None = None):
     return value
 
 
-def _finite_metrics(metrics):
-    """非有限更新由计数明确记录，不把其NaN标量送入要求有限值的日志接口。"""
-    return {name: value for name, value in metrics.items() if bool(torch.isfinite(torch.as_tensor(value)).all())}
+def _step_if_finite(optimizer, finite):
+    """融合 Adam 在设备上跳步；显式非融合配置保留原有限性分支。"""
+    if optimizer.param_groups[0]["fused"]:
+        optimizer.found_inf = (~finite).float()
+        try:
+            optimizer.step()
+        finally:
+            optimizer.found_inf = None
+    elif bool(finite):
+        optimizer.step()
 
 
 class Learner:
+    _counter_names = ("actor_updates", "model_updates", "critic_updates", "nonfinite_steps")
+
     def __init__(self, task, actor, model, critic, config, execution=None):
         self.task, self.actor, self.model, self.critic, self.config = task, actor, model, critic, config
         self.execution = ExecutionConfig(**asdict(execution if execution is not None else ExecutionConfig()))
+        self._device_counts = torch.zeros(4, dtype=torch.int64, device=next(model.parameters()).device)
         self.reset_policy_optimizers()
         # 关闭时沿用原默认自动选择foreach；显式False会改为单张量更新。
         fused = True if self.execution.fused_adam else None
@@ -61,6 +71,39 @@ class Learner:
         self.ramp_start = 0
         self.actor_frozen_until = 0
         self.policy_start = config.warmup_iterations
+
+    # 恢复代码按字段赋值时沿用设备存储，热路径只在日志或保存边界读取。
+    @property
+    def actor_updates(self):
+        return self._device_counts[0]
+
+    @actor_updates.setter
+    def actor_updates(self, value):
+        self._device_counts[0].copy_(torch.as_tensor(value, device=self._device_counts.device))
+
+    @property
+    def model_updates(self):
+        return self._device_counts[1]
+
+    @model_updates.setter
+    def model_updates(self, value):
+        self._device_counts[1].copy_(torch.as_tensor(value, device=self._device_counts.device))
+
+    @property
+    def critic_updates(self):
+        return self._device_counts[2]
+
+    @critic_updates.setter
+    def critic_updates(self, value):
+        self._device_counts[2].copy_(torch.as_tensor(value, device=self._device_counts.device))
+
+    @property
+    def nonfinite_steps(self):
+        return self._device_counts[3]
+
+    @nonfinite_steps.setter
+    def nonfinite_steps(self, value):
+        self._device_counts[3].copy_(torch.as_tensor(value, device=self._device_counts.device))
 
     def reset_policy_optimizers(self):
         """重建策略和价值优化器；世界模型优化器由其独立生命周期管理。"""
@@ -89,14 +132,12 @@ class Learner:
         loss = self.model.loss(window)
         loss.backward()
         gradient = clip_gradients(self.model.parameters(), self.config.grad_clip)
-        finite = bool(torch.isfinite(gradient))
-        if finite:
-            self.model_optimizer.step()
-            self.model_updates += 1
-        else:
-            self.nonfinite_steps += 1
-        return _finite_metrics({"wm_loss": loss.detach(), "wm_grad_norm": gradient.detach(),
-                                "wm_valid_steps": window.valid.sum(), "wm_skipped": float(not finite)})
+        finite = torch.isfinite(gradient)
+        _step_if_finite(self.model_optimizer, finite)
+        self.model_updates.add_(finite)
+        self.nonfinite_steps.add_(~finite)
+        return {"wm_loss": loss.detach(), "wm_grad_norm": gradient.detach(),
+                "wm_valid_steps": window.valid.sum(), "wm_skipped": (~finite).float()}
 
     def _critic_loss(self, features, targets):
         return (self.critic(features) - targets).square().mean()
@@ -106,8 +147,7 @@ class Learner:
         cfg = self.config
         critic, optimizer = self.critic, self.critic_optimizer
         critic.normalizer.update(features)
-        losses = []
-        skipped = updates = 0
+        losses, flags = [], []
         minibatch = features.shape[0] // cfg.critic_minibatches
         if minibatch == 0:
             raise ValueError("Imagined transitions must fill at least one row per critic minibatch")
@@ -125,12 +165,12 @@ class Learner:
                     value_loss += weighted_loss.detach()
                     del partial_loss, weighted_loss
                 gradient = clip_gradients(critic.parameters(), cfg.grad_clip)
-                if bool(torch.isfinite(gradient)):
-                    optimizer.step()
-                    updates += 1
-                else:
-                    skipped += 1
+                finite = torch.isfinite(gradient)
+                _step_if_finite(optimizer, finite)
+                flags.append(finite)
                 losses.append(value_loss)
+        updates = torch.stack(flags).sum()
+        skipped = cfg.critic_epochs * cfg.critic_minibatches - updates
         return torch.stack(losses).mean(), skipped, updates, minibatch
 
     def improve(self, seed, *, freeze_actor=False):
@@ -175,31 +215,29 @@ class Learner:
                 metrics[f"velocity_rmse_{axis}"] = value
             parameters = self.actor.policy_parameters()
             gradient = clip_gradients(parameters, cfg.grad_clip, cfg.grad_clip_element)
-            finite = bool(torch.isfinite(gradient)) and bool(torch.isfinite(metrics["actor_loss"]))
-            if not finite:
-                self.nonfinite_steps += 1
-            if not freeze_actor and finite:
-                self.actor_optimizer.step()
-                self.actor_updates += 1
+            finite = torch.isfinite(gradient) & torch.isfinite(metrics["actor_loss"])
+            self.nonfinite_steps.add_(~finite)
+            if not freeze_actor:
+                _step_if_finite(self.actor_optimizer, finite)
+                self.actor_updates.add_(finite)
         features = torch.cat(feature_batches)
         targets = torch.cat(target_batches)
         del feature_batches, target_batches
         value_loss, skipped, updates, minibatch = self._fit_critic(features, targets)
-        self.critic_updates += updates
+        self.critic_updates.add_(updates)
         metrics.update({"control_grad_norm": gradient.detach(), "critic_loss": value_loss,
-                        "control_skipped": float(not finite), "critic_skipped": skipped,
+                        "control_skipped": (~finite).float(), "critic_skipped": skipped,
                         "control_learning_rate": self.actor_optimizer.param_groups[0]["lr"],
                         "execution/imag_batch": batch,
                         "execution/imag_microbatch": min(batch, self.execution.imag_microbatch),
                         "execution/critic_microbatch": min(self.execution.critic_microbatch, minibatch)})
-        metrics["nonfinite_steps"] = self.nonfinite_steps
-        return _finite_metrics(metrics)
+        metrics["nonfinite_steps"] = self.nonfinite_steps.clone()
+        return metrics
 
     def state_dict(self):
         state = {"actor": self.actor_optimizer.state_dict(), "model": self.model_optimizer.state_dict(),
-                 "critic": self.critic_optimizer.state_dict(), "actor_updates": self.actor_updates,
-                 "model_updates": self.model_updates, "critic_updates": self.critic_updates,
-                 "nonfinite_steps": self.nonfinite_steps}
+                 "critic": self.critic_optimizer.state_dict()}
+        state.update(zip(self._counter_names, self._device_counts.detach().cpu().tolist()))
         return state
 
     def load_optimizer_state_dict(self, name, data):

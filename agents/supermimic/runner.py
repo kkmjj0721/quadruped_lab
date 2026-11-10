@@ -20,17 +20,10 @@ from .buffer import Replay, Window, WindowArchive
 from .config import ExecutionConfig, SuperMimicConfig
 from .exploration import stratified_collection_mask
 from .learner import Learner
+from .metrics import ModelMetrics, read_metrics
 from .policy import Critic, make_actor
+from .timing import PhaseTimer
 from .world_model import WorldModel
-
-
-def _numbers(metrics):
-    """在日志边界一次拷贝标量，采样热路径保留设备张量。"""
-    keys = [key for key, value in metrics.items() if isinstance(value, torch.Tensor)]
-    values = torch.stack([metrics[key].detach().float().reshape(()) for key in keys]).cpu().tolist() if keys else []
-    result = {key: float(value) for key, value in metrics.items() if key not in keys}
-    result.update(zip(keys, values))
-    return result
 
 
 def _cpu_tree(value):
@@ -126,10 +119,6 @@ class SuperMimicRunner:
             raise ValueError("Invalid logging target or interval")
         self.target_iteration = int(target_iteration)
         self.logger.log_interval = int(log_interval)
-
-    def _synchronize(self):
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
 
     def _collection_step_metrics(self):
         """任务子类提供设备上的原始／加权指标，算法不硬编码任务奖励。"""
@@ -291,58 +280,56 @@ class SuperMimicRunner:
         output = []
         target = max(self.target_iteration, self.iteration + iterations)
         # 预填使用整数批次且不消耗训练累加器；默认8步窗口仍先采10步。
-        self._synchronize()
-        prefill_started = time.perf_counter()
-        while self.replay.size <= self.config.wm_window + 1:
-            metrics = self.collect(int(self.config.collect_steps))
-            self._guard_falls += float(metrics["failures"])
-            self._guard_reset_steps += metrics["reset_steps"]
-        self._synchronize()
-        self.elapsed += time.perf_counter() - prefill_started
+        if self.replay.size <= self.config.wm_window + 1:
+            prefill_started = time.perf_counter()
+            prefill_falls = torch.zeros((), device=self.device)
+            prefill_reset_steps = 0
+            while self.replay.size <= self.config.wm_window + 1:
+                metrics = self.collect(int(self.config.collect_steps))
+                prefill_falls += metrics["failures"]
+                prefill_reset_steps += metrics["reset_steps"]
+            self._guard_falls += read_metrics({"failures": prefill_falls}, self.device)["failures"]
+            self._guard_reset_steps += prefill_reset_steps
+            self.elapsed += time.perf_counter() - prefill_started
         for _ in range(iterations):
             # 来源在真实采集前设置当前迭代号，驱动衰减与学习率使用同一编号。
             self.iteration += 1
-            self._synchronize()
             started = time.perf_counter()
+            timer = PhaseTimer(self.device)
             previous_steps = self.real_steps
-            previous_model_updates = self.learner.model_updates
-            previous_actor_updates = self.learner.actor_updates
-            previous_critic_updates = self.learner.critic_updates
+            previous_model_updates = self.learner.model_updates.clone()
+            previous_actor_updates = self.learner.actor_updates.clone()
+            previous_critic_updates = self.learner.critic_updates.clone()
             # 累加器跨learn调用保留余量，默认依次采2、3步。
             self._collect_step_accumulator += self.config.collect_steps
             collect_steps = int(self._collect_step_accumulator)
             self._collect_step_accumulator -= collect_steps
             metrics = self.collect(collect_steps)
             metrics["collection/control_steps"] = collect_steps
-            self._synchronize()
-            collection_time = time.perf_counter() - started
-            model_time = control_time = 0.0
+            timer.mark("collection")
             self.learner.schedule(self.iteration)
             enabled = False
-            if self.replay.ready(self.config.wm_window):
-                phase = time.perf_counter()
-                model_metrics = {}
+            model_validity = {}
+            policy_metric_names = set()
+            model_ready = self.replay.ready(self.config.wm_window)
+            if model_ready:
+                model_metrics = ModelMetrics()
                 for _ in range(self.config.wm_updates):
-                    for key, value in self.learner.fit_model(self._model_batch()).items():
-                        model_metrics[key] = model_metrics.get(key, 0) + value
-                metrics.update({key: value / self.config.wm_updates for key, value in model_metrics.items()})
-                self._synchronize()
-                model_time = time.perf_counter() - phase
-                if self.control_enabled and self.iteration > self.learner.policy_start:
-                    enabled = True
-                    phase = time.perf_counter()
-                    frozen = self.iteration <= self.learner.actor_frozen_until
-                    metrics.update(self.learner.improve(self.replay.sample_seeds(self.config.imag_batch),
-                                                       freeze_actor=frozen))
-                    metrics["control/actor_frozen"] = float(frozen)
-                    self.imagined_steps += self.config.horizon * self.config.imag_batch
-                    self._synchronize()
-                    control_time = time.perf_counter() - phase
+                    model_metrics.add(self.learner.fit_model(self._model_batch()))
+                averages, model_validity = model_metrics.mean(self.config.wm_updates)
+                metrics.update(averages)
             else:
                 metrics["model_not_ready"] = 1.0
-            elapsed = time.perf_counter() - started
-            self.elapsed += elapsed
-            self.session_iterations += 1
+            timer.mark("model")
+            if model_ready and self.control_enabled and self.iteration > self.learner.policy_start:
+                enabled = True
+                frozen = self.iteration <= self.learner.actor_frozen_until
+                policy_metrics = self.learner.improve(self.replay.sample_seeds(self.config.imag_batch), freeze_actor=frozen)
+                policy_metric_names = set(policy_metrics)
+                metrics.update(policy_metrics)
+                metrics["control/actor_frozen"] = float(frozen)
+                self.imagined_steps += self.config.horizon * self.config.imag_batch
+            timer.mark("control")
             delta = self.real_steps - previous_steps
             metrics.update(iteration=self.iteration, training_target_iteration=target, real_steps=self.real_steps,
                            real_steps_delta=delta, control_enabled=float(enabled), imagined_steps_total=self.imagined_steps,
@@ -354,20 +341,26 @@ class SuperMimicRunner:
                            world_model_learning_rate=self.learner.model_optimizer.param_groups[0]["lr"],
                            critic_learning_rate=self.learner.critic_optimizer.param_groups[0]["lr"],
                            control_learning_rate=self.learner.actor_optimizer.param_groups[0]["lr"],
-                           nonfinite_steps=self.learner.nonfinite_steps)
+                           nonfinite_steps=self.learner.nonfinite_steps,
+                           **{"replay/steps_per_env": self.replay.size,
+                              "replay/transitions": self.replay.size * self.env.num_envs,
+                              "replay/fill_fraction": self.replay.size / self.replay.capacity,
+                              "replay/archive_size": self.archive.size})
+            # 计数、学习率、损失和掩码同次读取；该拷贝也等待此前记录的阶段事件。
+            metrics = read_metrics(metrics, self.device, optional=policy_metric_names, validity=model_validity)
+            collection_time = timer.seconds("start", "collection")
+            model_time = timer.seconds("collection", "model") if model_ready else 0.0
+            control_time = timer.seconds("model", "control") if enabled else 0.0
+            elapsed = time.perf_counter() - started
+            self.elapsed += elapsed
+            self.session_iterations += 1
             metrics.update({"timing/collection_seconds": collection_time, "timing/world_model_seconds": model_time,
-                            "timing/control_seconds": control_time,
-                            "timing/learning_seconds": model_time + control_time,
-                            "timing/iteration_seconds": elapsed,
-                            "timing/session_elapsed_seconds": self.elapsed,
+                            "timing/control_seconds": control_time, "timing/learning_seconds": model_time + control_time,
+                            "timing/iteration_seconds": elapsed, "timing/session_elapsed_seconds": self.elapsed,
                             "timing/eta_seconds": self.elapsed / self.session_iterations * (target - self.iteration),
+                            "timing/cuda_events": float(self.device.type == "cuda"),
                             "performance/real_total_fps": delta / max(elapsed, 1e-9),
-                            "performance/real_collection_fps": delta / max(collection_time, 1e-9),
-                            "replay/steps_per_env": self.replay.size,
-                            "replay/transitions": self.replay.size * self.env.num_envs,
-                            "replay/fill_fraction": self.replay.size / self.replay.capacity,
-                            "replay/archive_size": self.archive.size})
-            metrics = _numbers(metrics)
+                            "performance/real_collection_fps": delta / max(collection_time, 1e-9)})
             if metrics["episode/completed"]:
                 metrics["episode/failure_fraction"] = metrics["failures"] / metrics["episode/completed"]
                 metrics["episode/timeout_fraction"] = metrics["timeouts"] / metrics["episode/completed"]
