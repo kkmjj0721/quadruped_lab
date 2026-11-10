@@ -1,11 +1,13 @@
 # Copyright (c) 2026-2027 zh
 """内容：装配 Go2 SuperMimic 训练器，持久化课程与任务配置快照。"""
 
+from contextlib import contextmanager
 from dataclasses import fields
 import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import time
 
 import torch
 
@@ -17,6 +19,16 @@ from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 from .transition_adapter import make_go2_supermimic_env
 from .deployment import deployment_metadata
 from .world_model import Go2WorldModel
+
+
+@contextmanager
+def _save_timing(timing, name):
+    """记录包含失败尝试的保存墙钟，父项与子项不相加。"""
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        timing.record_wall(name, time.perf_counter() - started)
 
 
 def algorithm_config(cfg):
@@ -97,18 +109,21 @@ class Go2SuperMimicRunner(SuperMimicRunner):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         # 先完成两种产物的生成与校验，再发布；导出失败不覆盖上次可用模型和ONNX。
-        with TemporaryDirectory(prefix=".checkpoint_", dir=path.parent) as temporary:
+        with _save_timing(self.timing, "save_total"), TemporaryDirectory(prefix=".checkpoint_", dir=path.parent) as temporary:
             temporary = Path(temporary)
             pending = temporary / path.name
-            super().save(pending)
-            checkpoint = torch.load(pending, map_location="cpu", weights_only=False)
-            checkpoint["go2_task"] = {"spec_hash": self.spec.hash, "curriculum": self.env.curriculum_state_dict()}
-            torch.save(checkpoint, pending)
-            export_policy_onnx(self.actor, temporary / "policy.onnx", iteration=self.iteration,
-                               metadata=deployment_metadata(self.env.cfg, spec_hash=self.spec.hash,
-                                                            algorithm=self.config))
-            os.replace(pending, path)
-            os.replace(temporary / "policy.onnx", path.parent / "policy.onnx")
+            with _save_timing(self.timing, "checkpoint_prepare"):
+                super().save(pending)
+                checkpoint = torch.load(pending, map_location="cpu", weights_only=False)
+                checkpoint["go2_task"] = {"spec_hash": self.spec.hash, "curriculum": self.env.curriculum_state_dict()}
+                torch.save(checkpoint, pending)
+            with _save_timing(self.timing, "onnx_export"):
+                export_policy_onnx(self.actor, temporary / "policy.onnx", iteration=self.iteration,
+                                   metadata=deployment_metadata(self.env.cfg, spec_hash=self.spec.hash,
+                                                                algorithm=self.config))
+            with _save_timing(self.timing, "checkpoint_publish"):
+                os.replace(pending, path)
+                os.replace(temporary / "policy.onnx", path.parent / "policy.onnx")
 
     def load(self, path, *, continue_run=False, reset_critic=False):
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)

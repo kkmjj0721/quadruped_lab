@@ -6,7 +6,8 @@ import math
 
 
 RUNNER_RUNTIME_FIELDS = ("max_iterations", "save_interval", "log_interval", "imag_microbatch",
-                         "critic_microbatch", "wm_compile", "fused_adam", "cuda_graph")
+                         "critic_microbatch", "wm_compile", "fused_adam", "cuda_graph",
+                         "detailed_timing", "timing_interval")
 
 
 @dataclass
@@ -18,13 +19,15 @@ class ExecutionConfig:
     wm_compile: bool = True  # 完整自回归监督及损失。
     fused_adam: bool = True
     cuda_graph: bool = True  # CUDA默认捕获更新；CPU由runner解析为False。
+    detailed_timing: bool = False  # 图外记录阶段事件，原有计时指标保持原义。
+    timing_interval: int = 1  # 详细计时的采样轮数间隔；首次使用和图准备轮强制记录。
 
     def __post_init__(self):
-        for name in ("imag_microbatch", "critic_microbatch"):
+        for name in ("imag_microbatch", "critic_microbatch", "timing_interval"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("wm_compile", "fused_adam", "cuda_graph"):
+        for name in ("wm_compile", "fused_adam", "cuda_graph", "detailed_timing"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean")
 

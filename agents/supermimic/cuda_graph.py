@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import fields, is_dataclass
 import gc
 
@@ -231,7 +231,17 @@ class CudaGraphLearner(Learner):
                 flags.append(finite)
         return torch.stack(losses).mean(), torch.stack(flags).sum()
 
-    def improve(self, seed, *, freeze_actor=False):
+    def timing_setup_pending(self, *, control_enabled=False, freeze_actor=False):
+        """按本轮实际使用的图判断是否仍有预热／捕获，查询不创建或重放图。"""
+        if self._model_update.graph is None:
+            return True
+        if not control_enabled:
+            return False
+        actor = self._actor_updates.get(freeze_actor)
+        return (actor is None or actor.graph is None or self._critic_update is None
+                or self._critic_update.graph is None)
+
+    def improve(self, seed, *, freeze_actor=False, timing=None):
         batch = seed.history.shape[0]
         if batch < 1:
             raise ValueError("Imagination seed batch must be nonempty")
@@ -239,18 +249,21 @@ class CudaGraphLearner(Learner):
             self._actor_updates[freeze_actor] = CapturedUpdate(
                 lambda value: self._actor_core(value, freeze_actor=freeze_actor), self.device)
         actor_update = self._actor_updates[freeze_actor]
-        metrics, features, targets, finite = actor_update(seed)
-        self.nonfinite_steps.add_(~finite)
-        if not freeze_actor:
-            self.actor_updates.add_(finite)
-        # 归一化统计和原有输入有限性校验留在图外，时序与主线一致。
-        self.critic.normalizer.update(features)
-        minibatch = features.shape[0] // self.config.critic_minibatches
-        if minibatch == 0:
-            raise ValueError("Imagined transitions must fill at least one row per critic minibatch")
-        if self._critic_update is None:
-            self._critic_update = CapturedUpdate(self._critic_core, self.device)
-        value_loss, count = self._critic_update(features, targets)
+        with timing.section("actor_update") if timing is not None else nullcontext():
+            metrics, features, targets, finite = actor_update(seed)
+            self.nonfinite_steps.add_(~finite)
+            if not freeze_actor:
+                self.actor_updates.add_(finite)
+        with timing.section("critic_prepare") if timing is not None else nullcontext():
+            # 归一化统计和原有输入有限性校验留在图外，时序与主线一致。
+            self.critic.normalizer.update(features)
+            minibatch = features.shape[0] // self.config.critic_minibatches
+            if minibatch == 0:
+                raise ValueError("Imagined transitions must fill at least one row per critic minibatch")
+            if self._critic_update is None:
+                self._critic_update = CapturedUpdate(self._critic_core, self.device)
+        with timing.section("critic_update") if timing is not None else nullcontext():
+            value_loss, count = self._critic_update(features, targets)
         skipped = self.config.critic_epochs * self.config.critic_minibatches - count
         self.critic_updates.add_(count)
         result = {name: value.clone() for name, value in metrics.items()}

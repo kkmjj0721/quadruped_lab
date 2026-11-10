@@ -40,6 +40,10 @@ class SuperMimicTrainConfig:
     """覆盖全部优化器及护栏重建的fused Adam开关；未指定时沿用runner配置。"""
     cuda_graph: bool | None = None
     """覆盖CUDA更新图开关；CUDA默认启用且需要fused Adam，CPU使用原执行方式。"""
+    detailed_timing: bool | None = None
+    """覆盖训练阶段详细计时开关；会话完整墙钟在两种状态均记录。"""
+    timing_interval: int | None = None
+    """覆盖详细阶段的采样间隔，单位为迭代；首次使用和图捕获轮强制记录。"""
     log_root: str = "logs/supermimic"
     experiment_name: str = "go2_supermimic"
     run_name: str = ""

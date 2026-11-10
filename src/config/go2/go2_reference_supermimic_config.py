@@ -142,6 +142,8 @@ class Go2ReferenceCfg(BaseConfig):
         wm_compile = True  # 编译完整八步监督及损失。
         fused_adam = True
         cuda_graph = True  # CUDA默认捕获模型、actor和critic更新；CPU使用原执行方式。
+        detailed_timing = False  # 可显式开启图外采样／更新细分，原有阶段计时继续保留。
+        timing_interval = 1  # 正整数；图准备及首次阶段强制采样，其余按此轮数间隔记录。
         enable_control_updates = True
         standing_zero_noise = True  # 站立命令采集关闭额外动作噪声，保留固定无噪声组。
 

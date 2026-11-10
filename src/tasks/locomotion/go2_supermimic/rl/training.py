@@ -15,12 +15,14 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 
 import torch
 import yaml
 from mjlab.utils.torch import configure_torch_backends
 
 from agents.supermimic.config import ExecutionConfig, RUNNER_RUNTIME_FIELDS
+from agents.supermimic.timing import TrainingTiming
 
 from ..config.loading import (
     apply_settings as _apply_settings, read_settings as _read_settings,
@@ -145,6 +147,7 @@ def _run_origin(task_id: str, args: SuperMimicTrainConfig, device: str, resume: 
 
 def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     """调用既有runner训练至目标轮次，周期保存模型和ONNX并返回独立产物目录。"""
+    entry_started = time.perf_counter()
     _validate_arguments(task_id, args)
     cfg, resume, source = _resolve_task_config(task_id, args)
     runtime = cfg.runner
@@ -160,16 +163,25 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     print(f"[INFO] Training with: task={task_id}, device={device}, seed={cfg.env.seed}", flush=True)
     print(f"[INFO] Control updates enabled: {cfg.runner.enable_control_updates}", flush=True)
     execution = ExecutionConfig(**{field.name: getattr(runtime, field.name) for field in fields(ExecutionConfig)})
-    runner = make_go2_supermimic_runner(cfg, device=device, log_dir=log_dir, execution=execution)
-    execution = runner.execution
-    print(f"[INFO] SuperMimic {cfg.algorithm} training: envs={cfg.env.num_envs}, "
-          f"collect_avg={cfg.algo.collect_steps:g}, utd={1.0 / cfg.algo.collect_steps:g}, "
-          f"wm_batch={cfg.algo.wm_batch}, imag_batch={cfg.algo.imag_batch}, "
-          f"replay={cfg.algo.replay_capacity}, compile={cfg.algo.compile_imagination}, "
-          f"imag_microbatch={execution.imag_microbatch}, critic_microbatch={execution.critic_microbatch}, "
-          f"wm_compile={execution.wm_compile}, fused_adam={execution.fused_adam}, "
-          f"cuda_graph={execution.cuda_graph}", flush=True)
+    timing = TrainingTiming(device, enabled=execution.detailed_timing, interval=execution.timing_interval)
+    runner = None
+    initialized = training_completed = False
+    starting_steps = starting_iteration = starting_prefill_steps = 0
     try:
+        runner = make_go2_supermimic_runner(cfg, device=device, log_dir=log_dir, execution=execution)
+        timing, execution = runner.timing, runner.execution
+        if torch.device(device).type == "cuda":
+            torch.cuda.synchronize(device)
+        timing.record_wall("initialization", time.perf_counter() - entry_started)
+        initialized = True
+        print(f"[INFO] SuperMimic {cfg.algorithm} training: envs={cfg.env.num_envs}, "
+              f"collect_avg={cfg.algo.collect_steps:g}, utd={1.0 / cfg.algo.collect_steps:g}, "
+              f"wm_batch={cfg.algo.wm_batch}, imag_batch={cfg.algo.imag_batch}, "
+              f"replay={cfg.algo.replay_capacity}, compile={cfg.algo.compile_imagination}, "
+              f"imag_microbatch={execution.imag_microbatch}, critic_microbatch={execution.critic_microbatch}, "
+              f"wm_compile={execution.wm_compile}, fused_adam={execution.fused_adam}, "
+              f"cuda_graph={execution.cuda_graph}, detailed_timing={execution.detailed_timing}, "
+              f"timing_interval={execution.timing_interval}", flush=True)
         # 快照反映JSON与CLI覆盖后的实际配置，普通YAML类型便于直接查看和安全回读。
         origin = json.loads(json.dumps(_run_origin(task_id, args, device, resume, source), default=str))
         origin.update(seed=cfg.env.seed, num_envs=cfg.env.num_envs)
@@ -190,7 +202,13 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
             origin, indent=2) + "\n```")
         if resume is not None:
             print(f"[INFO] Loading model checkpoint from: {resume}", flush=True)
-            runner.load(resume, continue_run=args.continue_run, reset_critic=args.reset_critic)
+            restore_started = time.perf_counter()
+            try:
+                runner.load(resume, continue_run=args.continue_run, reset_critic=args.reset_critic)
+            finally:
+                timing.record_wall("restore", time.perf_counter() - restore_started)
+        starting_steps, starting_iteration = runner.real_steps, runner.iteration
+        starting_prefill_steps = runner.prefill_real_steps
         target_iteration = runtime.max_iterations
         if target_iteration <= runner.iteration:
             raise ValueError(f"Target iteration {target_iteration} must exceed checkpoint iteration {runner.iteration}")
@@ -198,13 +216,80 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
         while runner.iteration < target_iteration:
             remaining = target_iteration - runner.iteration
             until_checkpoint = runtime.save_interval - runner.iteration % runtime.save_interval
-            runner.learn(min(remaining, until_checkpoint))
+            learn_started = time.perf_counter()
+            try:
+                runner.learn(min(remaining, until_checkpoint))
+            finally:
+                timing.record_wall("learn_blocks", time.perf_counter() - learn_started)
             # 参考在塌缩护栏首次预警时跳过该保存点，不发布可疑策略及其ONNX。
             if runner._collapse_strikes == 0:
                 checkpoint = log_dir / f"model_{runner.iteration}.pt"
                 runner.save(checkpoint)
                 print(f"[INFO] Saved checkpoint: {checkpoint}", flush=True)
+        training_completed = True
     finally:
-        runner.close()
-        runner.env.close()
+        primary_error = sys.exception()
+        cleanup_error = None
+        if not initialized:
+            timing.record_wall("initialization", time.perf_counter() - entry_started)
+        if runner is not None:
+            # 分别关闭两项资源；已有训练异常优先传播，清理异常作为上下文保留。
+            for name, close in (("logger_close", runner.close), ("environment_close", runner.env.close)):
+                close_started = time.perf_counter()
+                try:
+                    close()
+                except BaseException as error:
+                    if primary_error is not None:
+                        primary_error.add_note(f"Cleanup failed in {name}: {error!r}")
+                    elif cleanup_error is None:
+                        cleanup_error = error
+                    else:
+                        cleanup_error.add_note(f"Cleanup failed in {name}: {error!r}")
+                finally:
+                    timing.record_wall(name, time.perf_counter() - close_started)
+        try:
+            if torch.device(device).type == "cuda":
+                torch.cuda.synchronize(device)
+        except BaseException as error:
+            if primary_error is not None:
+                primary_error.add_note(f"Final CUDA synchronization failed: {error!r}")
+            elif cleanup_error is None:
+                cleanup_error = error
+            else:
+                cleanup_error.add_note(f"Final CUDA synchronization failed: {error!r}")
+        entry_seconds = time.perf_counter() - entry_started
+        timing.record_wall("entry_total", entry_seconds)
+        error = primary_error if primary_error is not None else cleanup_error
+        summary = timing.summary()
+        added_steps = runner.real_steps - starting_steps if runner is not None else 0
+        prefill_steps = runner.prefill_real_steps - starting_prefill_steps if runner is not None else 0
+        training_steps = added_steps - prefill_steps
+        summary["run"] = {
+            "task_id": task_id, "seed": cfg.env.seed, "num_envs": cfg.env.num_envs,
+            "initialized": initialized, "training_completed": training_completed,
+            "success": training_completed and error is None,
+            "error": {"type": type(error).__name__, "message": str(error)} if error is not None else None,
+            "start_iteration": starting_iteration, "target_iteration": runtime.max_iterations,
+            "final_iteration": runner.iteration if runner is not None else None,
+            "new_real_steps_including_prefill": added_steps,
+            "new_prefill_real_steps": prefill_steps, "new_training_real_steps": training_steps,
+            "entry_real_transitions_per_second": added_steps / entry_seconds,
+            "entry_training_transitions_per_second": training_steps / entry_seconds,
+            "runner_internal_seconds": runner.elapsed if runner is not None else None,
+        }
+        summary["scope"].update({
+            "entry_total": "launch_training entry through logger/environment close and final target-device synchronization; excludes this summary write",
+            "learn_blocks": "Inclusive host wall of runner.learn calls; includes prefill, setup and per-iteration logging, excludes outer checkpoint save",
+            "save_total": "Inclusive parent of checkpoint_prepare, onnx_export, checkpoint_publish and temporary-directory cleanup; do not sum parent and children",
+            "process_wall": "Not measured here; the explicit training test launcher measures child-process wall externally",
+            "transitions": "New steps subtract restored counters; entry_real_transitions_per_second includes prefill, entry_training_transitions_per_second excludes it",
+        })
+        try:
+            (log_dir / "timing_summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+        except (OSError, TypeError, ValueError) as summary_error:
+            if error is None:
+                raise
+            error.add_note(f"Timing summary write failed: {summary_error!r}")
+        if primary_error is None and cleanup_error is not None:
+            raise cleanup_error
     return log_dir

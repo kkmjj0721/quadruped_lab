@@ -22,7 +22,7 @@ from .exploration import stratified_collection_mask
 from .learner import Learner
 from .metrics import ModelMetrics, read_metrics
 from .policy import Critic, make_actor
-from .timing import PhaseTimer
+from .timing import PhaseTimer, TrainingTiming
 from .world_model import WorldModel
 
 
@@ -57,6 +57,8 @@ class SuperMimicRunner:
         self.config = SuperMimicConfig(**asdict(config))
         self.execution = ExecutionConfig(**asdict(execution)) if execution is not None else ExecutionConfig()
         self.execution.cuda_graph = self.execution.cuda_graph and self.device.type == "cuda"
+        self.timing = TrainingTiming(self.device, enabled=self.execution.detailed_timing,
+                                     interval=self.execution.timing_interval)
         if self.execution.cuda_graph and not self.execution.fused_adam:
             raise ValueError("CUDA-graph updates require fused Adam; disable cuda_graph to use non-fused Adam")
         cfg = self.config
@@ -81,6 +83,7 @@ class SuperMimicRunner:
         self.archive = WindowArchive(cfg.archive_size)
         self.control_enabled = bool(control_enabled)
         self.iteration = self.real_steps = self.imagined_steps = 0
+        self.prefill_real_steps = 0
         self._collect_step_accumulator = 0.0
         self.current = self.history = None
         self.driver = self.expert = None
@@ -282,6 +285,7 @@ class SuperMimicRunner:
         # 预填使用整数批次且不消耗训练累加器；默认8步窗口仍先采10步。
         if self.replay.size <= self.config.wm_window + 1:
             prefill_started = time.perf_counter()
+            prefill_previous_steps = self.real_steps
             prefill_falls = torch.zeros((), device=self.device)
             prefill_reset_steps = 0
             while self.replay.size <= self.config.wm_window + 1:
@@ -290,7 +294,10 @@ class SuperMimicRunner:
                 prefill_reset_steps += metrics["reset_steps"]
             self._guard_falls += read_metrics({"failures": prefill_falls}, self.device)["failures"]
             self._guard_reset_steps += prefill_reset_steps
-            self.elapsed += time.perf_counter() - prefill_started
+            prefill_seconds = time.perf_counter() - prefill_started
+            self.elapsed += prefill_seconds
+            self.prefill_real_steps += self.real_steps - prefill_previous_steps
+            self.timing.record_wall("prefill", prefill_seconds)
         for _ in range(iterations):
             # 来源在真实采集前设置当前迭代号，驱动衰减与学习率使用同一编号。
             self.iteration += 1
@@ -300,11 +307,18 @@ class SuperMimicRunner:
             previous_model_updates = self.learner.model_updates.clone()
             previous_actor_updates = self.learner.actor_updates.clone()
             previous_critic_updates = self.learner.critic_updates.clone()
+            control_requested = self.control_enabled and self.iteration > self.learner.policy_start
+            frozen = self.iteration <= self.learner.actor_frozen_until
+            if self.execution.detailed_timing:
+                phase = "actor_frozen" if control_requested and frozen else "training" if control_requested else "model_warmup"
+                setup = self.learner.timing_setup_pending(control_enabled=control_requested, freeze_actor=frozen)
+                self.timing.begin_iteration(self.iteration, phase, setup=setup)
             # 累加器跨learn调用保留余量，默认依次采2、3步。
             self._collect_step_accumulator += self.config.collect_steps
             collect_steps = int(self._collect_step_accumulator)
             self._collect_step_accumulator -= collect_steps
-            metrics = self.collect(collect_steps)
+            with self.timing.section("collection"):
+                metrics = self.collect(collect_steps)
             metrics["collection/control_steps"] = collect_steps
             timer.mark("collection")
             self.learner.schedule(self.iteration)
@@ -315,7 +329,11 @@ class SuperMimicRunner:
             if model_ready:
                 model_metrics = ModelMetrics()
                 for _ in range(self.config.wm_updates):
-                    model_metrics.add(self.learner.fit_model(self._model_batch()))
+                    with self.timing.section("wm_sampling"):
+                        window = self._model_batch()
+                    with self.timing.section("wm_update"):
+                        model_metrics.add(self.learner.fit_model(window))
+                    del window
                 averages, model_validity = model_metrics.mean(self.config.wm_updates)
                 metrics.update(averages)
             else:
@@ -323,8 +341,13 @@ class SuperMimicRunner:
             timer.mark("model")
             if model_ready and self.control_enabled and self.iteration > self.learner.policy_start:
                 enabled = True
-                frozen = self.iteration <= self.learner.actor_frozen_until
-                policy_metrics = self.learner.improve(self.replay.sample_seeds(self.config.imag_batch), freeze_actor=frozen)
+                with self.timing.section("seed_sampling"):
+                    seed = self.replay.sample_seeds(self.config.imag_batch)
+                if self.execution.detailed_timing:
+                    policy_metrics = self.learner.improve(seed, freeze_actor=frozen, timing=self.timing)
+                else:
+                    policy_metrics = self.learner.improve(seed, freeze_actor=frozen)
+                del seed
                 policy_metric_names = set(policy_metrics)
                 metrics.update(policy_metrics)
                 metrics["control/actor_frozen"] = float(frozen)
@@ -347,10 +370,13 @@ class SuperMimicRunner:
                               "replay/fill_fraction": self.replay.size / self.replay.capacity,
                               "replay/archive_size": self.archive.size})
             # 计数、学习率、损失和掩码同次读取；该拷贝也等待此前记录的阶段事件。
-            metrics = read_metrics(metrics, self.device, optional=policy_metric_names, validity=model_validity)
+            with self.timing.section("metric_read", cuda=False):
+                metrics = read_metrics(metrics, self.device, optional=policy_metric_names, validity=model_validity)
             collection_time = timer.seconds("start", "collection")
             model_time = timer.seconds("collection", "model") if model_ready else 0.0
             control_time = timer.seconds("model", "control") if enabled else 0.0
+            metrics.update(self.timing.device_metrics())
+            metrics.update(self.timing.previous_metrics())
             elapsed = time.perf_counter() - started
             self.elapsed += elapsed
             self.session_iterations += 1
@@ -365,7 +391,11 @@ class SuperMimicRunner:
                 metrics["episode/failure_fraction"] = metrics["failures"] / metrics["episode/completed"]
                 metrics["episode/timeout_fraction"] = metrics["timeouts"] / metrics["episode/completed"]
             self._collapse_guard(metrics)
+            logging_started = time.perf_counter() if self.execution.detailed_timing else None
             self.logger.record(metrics)
+            if self.execution.detailed_timing:
+                finished = time.perf_counter()
+                self.timing.end_iteration(finished - started, finished - logging_started)
             output.append(metrics)
         return output
 
@@ -448,6 +478,7 @@ class SuperMimicRunner:
         self.replay.clear()
         self.archive.clear()
         self.elapsed = 0.0
+        self.prefill_real_steps = 0
         self.session_iterations = 0
         self._collapse_strikes = 0
         self._guard_falls, self._guard_reset_steps = 0.0, 0

@@ -1,7 +1,7 @@
 # Copyright (c) 2026-2027 zh
 """内容：拟合物理模型与价值目标，以想象回报和真实速度监督更新策略。"""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 import math
 
@@ -142,88 +142,97 @@ class Learner:
     def _critic_loss(self, features, targets):
         return (self.critic(features) - targets).square().mean()
 
-    def _fit_critic(self, features, targets):
+    def timing_setup_pending(self, *, control_enabled=False, freeze_actor=False):
+        """普通执行没有独立的Graph预热／捕获阶段。"""
+        return False
+
+    def _fit_critic(self, features, targets, *, timing=None):
         """以固定想象目标拟合价值网络，保留尾批与分批累积语义。"""
         cfg = self.config
         critic, optimizer = self.critic, self.critic_optimizer
-        critic.normalizer.update(features)
-        losses, flags = [], []
-        minibatch = features.shape[0] // cfg.critic_minibatches
-        if minibatch == 0:
-            raise ValueError("Imagined transitions must fill at least one row per critic minibatch")
-        for _ in range(cfg.critic_epochs):
-            indices = torch.randperm(features.shape[0], device=features.device)
-            # 参考按整除的小批宽度取片，余数不参与本轮critic监督。
-            for index in range(cfg.critic_minibatches):
-                selected = indices[index * minibatch:(index + 1) * minibatch]
-                optimizer.zero_grad(set_to_none=True)
-                value_loss = features.new_zeros(())
-                for part in selected.split(self.execution.critic_microbatch):
-                    partial_loss = self.critic_loss_kernel(features[part], targets[part])
-                    weighted_loss = partial_loss * (part.numel() / selected.numel())
-                    weighted_loss.backward()
-                    value_loss += weighted_loss.detach()
-                    del partial_loss, weighted_loss
-                gradient = clip_gradients(critic.parameters(), cfg.grad_clip)
-                finite = torch.isfinite(gradient)
-                _step_if_finite(optimizer, finite)
-                flags.append(finite)
-                losses.append(value_loss)
-        updates = torch.stack(flags).sum()
-        skipped = cfg.critic_epochs * cfg.critic_minibatches - updates
-        return torch.stack(losses).mean(), skipped, updates, minibatch
+        with timing.section("critic_prepare") if timing is not None else nullcontext():
+            critic.normalizer.update(features)
+            losses, flags = [], []
+            minibatch = features.shape[0] // cfg.critic_minibatches
+            if minibatch == 0:
+                raise ValueError("Imagined transitions must fill at least one row per critic minibatch")
+        with timing.section("critic_update") if timing is not None else nullcontext():
+            for _ in range(cfg.critic_epochs):
+                indices = torch.randperm(features.shape[0], device=features.device)
+                # 参考按整除的小批宽度取片，余数不参与本轮critic监督。
+                for index in range(cfg.critic_minibatches):
+                    selected = indices[index * minibatch:(index + 1) * minibatch]
+                    optimizer.zero_grad(set_to_none=True)
+                    value_loss = features.new_zeros(())
+                    for part in selected.split(self.execution.critic_microbatch):
+                        partial_loss = self.critic_loss_kernel(features[part], targets[part])
+                        weighted_loss = partial_loss * (part.numel() / selected.numel())
+                        weighted_loss.backward()
+                        value_loss += weighted_loss.detach()
+                        del partial_loss, weighted_loss
+                    gradient = clip_gradients(critic.parameters(), cfg.grad_clip)
+                    finite = torch.isfinite(gradient)
+                    _step_if_finite(optimizer, finite)
+                    flags.append(finite)
+                    losses.append(value_loss)
+            updates = torch.stack(flags).sum()
+            skipped = cfg.critic_epochs * cfg.critic_minibatches - updates
+            value_loss = torch.stack(losses).mean()
+        return value_loss, skipped, updates, minibatch
 
-    def improve(self, seed, *, freeze_actor=False):
+    def improve(self, seed, *, freeze_actor=False, timing=None):
         cfg = self.config
         batch = seed.history.shape[0]
         if batch < 1:
             raise ValueError("Imagination seed batch must be nonempty")
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        self.model_optimizer.zero_grad(set_to_none=True)
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        feature_batches, target_batches = [], []
-        metrics = {}
-        velocity_mse_axes = seed.history.new_zeros(3)
-        with frozen(self.model, self.critic):
-            for start in range(0, batch, self.execution.imag_microbatch):
-                end = min(start + self.execution.imag_microbatch, batch)
-                weight = (end - start) / batch
-                part = Seed(seed.state.index(slice(start, end)), seed.history[start:end])
-                data = self.imagination.rollout(part)
-                targets = self.imagination.lambda_returns(data)
-                control_loss = -data.objective.mean()
-                _, velocity = self.actor.encode(part.history)
-                target_velocity = self.task.body_linear_velocity(part.state).detach()
-                velocity_error = (velocity - target_velocity).square()
-                velocity_loss = velocity_error.mean()
-                loss = control_loss + cfg.velocity_loss_coef * velocity_loss
-                (loss * weight).backward()
-                feature_batches.append(data.features[:, :-1].flatten(0, 1).detach())
-                target_batches.append(targets.flatten().detach())
-                velocity_mse_axes += velocity_error.detach().mean(0) * weight
-                values = {"control_loss": control_loss.detach(), "velocity_loss": velocity_loss.detach(),
-                          "actor_loss": loss.detach(),
-                          "imagination/survival_h": data.survival.detach().mean(),
-                          "imagination/discounted_reward": data.discounted_reward.detach().mean(),
-                          "imagination/bootstrap": data.bootstrap.detach().mean(),
-                          "imagination/reward": data.rewards.mean()}
-                for name, value in values.items():
-                    metrics[name] = metrics.get(name, 0) + value * weight
-                del data, targets, loss, control_loss, velocity_loss, velocity_error, velocity, target_velocity, values, part
-            metrics["velocity_rmse"] = velocity_mse_axes.mean().sqrt()
-            for axis, value in zip(("x", "y", "z"), velocity_mse_axes.sqrt()):
-                metrics[f"velocity_rmse_{axis}"] = value
-            parameters = self.actor.policy_parameters()
-            gradient = clip_gradients(parameters, cfg.grad_clip, cfg.grad_clip_element)
-            finite = torch.isfinite(gradient) & torch.isfinite(metrics["actor_loss"])
-            self.nonfinite_steps.add_(~finite)
-            if not freeze_actor:
-                _step_if_finite(self.actor_optimizer, finite)
-                self.actor_updates.add_(finite)
-        features = torch.cat(feature_batches)
-        targets = torch.cat(target_batches)
-        del feature_batches, target_batches
-        value_loss, skipped, updates, minibatch = self._fit_critic(features, targets)
+        with timing.section("actor_update") if timing is not None else nullcontext():
+            self.actor_optimizer.zero_grad(set_to_none=True)
+            self.model_optimizer.zero_grad(set_to_none=True)
+            self.critic_optimizer.zero_grad(set_to_none=True)
+            feature_batches, target_batches = [], []
+            metrics = {}
+            velocity_mse_axes = seed.history.new_zeros(3)
+            with frozen(self.model, self.critic):
+                for start in range(0, batch, self.execution.imag_microbatch):
+                    end = min(start + self.execution.imag_microbatch, batch)
+                    weight = (end - start) / batch
+                    part = Seed(seed.state.index(slice(start, end)), seed.history[start:end])
+                    data = self.imagination.rollout(part)
+                    targets = self.imagination.lambda_returns(data)
+                    control_loss = -data.objective.mean()
+                    _, velocity = self.actor.encode(part.history)
+                    target_velocity = self.task.body_linear_velocity(part.state).detach()
+                    velocity_error = (velocity - target_velocity).square()
+                    velocity_loss = velocity_error.mean()
+                    loss = control_loss + cfg.velocity_loss_coef * velocity_loss
+                    (loss * weight).backward()
+                    feature_batches.append(data.features[:, :-1].flatten(0, 1).detach())
+                    target_batches.append(targets.flatten().detach())
+                    velocity_mse_axes += velocity_error.detach().mean(0) * weight
+                    values = {"control_loss": control_loss.detach(), "velocity_loss": velocity_loss.detach(),
+                              "actor_loss": loss.detach(),
+                              "imagination/survival_h": data.survival.detach().mean(),
+                              "imagination/discounted_reward": data.discounted_reward.detach().mean(),
+                              "imagination/bootstrap": data.bootstrap.detach().mean(),
+                              "imagination/reward": data.rewards.mean()}
+                    for name, value in values.items():
+                        metrics[name] = metrics.get(name, 0) + value * weight
+                    del data, targets, loss, control_loss, velocity_loss, velocity_error, velocity, target_velocity, values, part
+                metrics["velocity_rmse"] = velocity_mse_axes.mean().sqrt()
+                for axis, value in zip(("x", "y", "z"), velocity_mse_axes.sqrt()):
+                    metrics[f"velocity_rmse_{axis}"] = value
+                parameters = self.actor.policy_parameters()
+                gradient = clip_gradients(parameters, cfg.grad_clip, cfg.grad_clip_element)
+                finite = torch.isfinite(gradient) & torch.isfinite(metrics["actor_loss"])
+                self.nonfinite_steps.add_(~finite)
+                if not freeze_actor:
+                    _step_if_finite(self.actor_optimizer, finite)
+                    self.actor_updates.add_(finite)
+            features = torch.cat(feature_batches)
+            targets = torch.cat(target_batches)
+            del feature_batches, target_batches
+        value_loss, skipped, updates, minibatch = (self._fit_critic(features, targets) if timing is None else
+                                                 self._fit_critic(features, targets, timing=timing))
         self.critic_updates.add_(updates)
         metrics.update({"control_grad_norm": gradient.detach(), "critic_loss": value_loss,
                         "control_skipped": (~finite).float(), "critic_skipped": skipped,
