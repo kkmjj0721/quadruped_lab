@@ -7,7 +7,7 @@ import math
 
 RUNNER_RUNTIME_FIELDS = ("max_iterations", "save_interval", "log_interval", "imag_microbatch",
                          "critic_microbatch", "wm_compile", "fused_adam", "cuda_graph",
-                         "detailed_timing", "timing_interval")
+                         "detailed_timing", "timing_interval", "replay_history_storage")
 
 
 @dataclass
@@ -21,8 +21,11 @@ class ExecutionConfig:
     cuda_graph: bool = True  # CUDA默认捕获更新；CPU由runner解析为False。
     detailed_timing: bool = False  # 图外记录阶段事件，原有计时指标保持原义。
     timing_interval: int = 1  # 详细计时的采样轮数间隔；首次使用和图准备轮强制记录。
+    replay_history_storage: str = "frames"  # 默认只保存实际带噪单帧；full保留完整历史作显式对照。
 
     def __post_init__(self):
+        if self.replay_history_storage not in ("full", "frames"):
+            raise ValueError("replay_history_storage must be full or frames")
         for name in ("imag_microbatch", "critic_microbatch", "timing_interval"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:

@@ -127,11 +127,25 @@ class MoeActor(nn.Module):
         return self.framed(history).reshape(-1, self.observation_dim * self.history_length)
 
     @torch.no_grad()
-    def update_statistics(self, history: Tensor):
-        """历史与当前帧分别累计统计；采集热路径每步只调用一次。"""
+    def prepare_statistics(self, history: Tensor):
+        """两套独立统计均以环境为样本轴，保留历史帧各位置的特征。"""
         history = self.framed(history)
-        self.normalizer.update(self.flatten_history(history))
-        self.frame_normalizer.update(history[:, -1])
+        return (self.normalizer.prepare_update(self.flatten_history(history)),
+                self.frame_normalizer.prepare_update(history[:, -1]))
+
+    @torch.no_grad()
+    def apply_statistics(self, statistics):
+        """只提交本控制步已经统一校验的历史与当前帧统计。"""
+        self.normalizer.apply_update(statistics[0])
+        self.frame_normalizer.apply_update(statistics[1])
+
+    @torch.no_grad()
+    def update_statistics(self, history: Tensor):
+        """独立入口即时校验；采集热路径通过准备／提交合并检查。"""
+        statistics = self.prepare_statistics(history)
+        if not torch.stack([item.finite for item in statistics]).all():
+            raise FloatingPointError("Normalization data contains non-finite values")
+        self.apply_statistics(statistics)
 
     @torch.jit.export
     def encode(self, history: Tensor) -> tuple[Tensor, Tensor]:

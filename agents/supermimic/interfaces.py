@@ -75,5 +75,9 @@ class EnvStep:
 
 
 def append_history(history: Tensor, observation: Tensor) -> Tensor:
-    """无原地修改地推进历史，保留想象中的跨步梯度。"""
+    """无原地修改地推进历史，保留想象中的跨步梯度。
+
+    真实回放要求连续插入：非结束环境沿用此推进，结束后下一决策历史
+    重复同一个新回合带噪首帧；清空回放后的首次插入提供完整历史前缀。
+    """
     return torch.cat((history[:, 1:], observation.unsqueeze(1)), dim=1)

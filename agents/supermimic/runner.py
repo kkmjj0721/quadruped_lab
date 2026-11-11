@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from collections import deque
 from copy import deepcopy
 from dataclasses import asdict
 import json
@@ -20,7 +19,7 @@ from .buffer import Replay, Window, WindowArchive
 from .config import ExecutionConfig, SuperMimicConfig
 from .exploration import stratified_collection_mask
 from .learner import Learner
-from .metrics import ModelMetrics, read_metrics
+from .metrics import EpisodeWindow, ModelMetrics, read_metrics
 from .policy import Critic, make_actor
 from .timing import PhaseTimer, TrainingTiming
 from .world_model import WorldModel
@@ -79,7 +78,8 @@ class SuperMimicRunner:
         self.model.configure_supervised_compile(enabled=self.execution.wm_compile, backend=cfg.compile_backend)
         self.critic = Critic(self.spec.privileged_dim, cfg.critic_hidden).to(self.device)
         self.learner = self._make_learner()
-        self.replay = Replay(self.spec, env.num_envs, cfg.replay_capacity, self.device)
+        self.replay = Replay(self.spec, env.num_envs, cfg.replay_capacity, self.device,
+                             history_storage=self.execution.replay_history_storage)
         self.archive = WindowArchive(cfg.archive_size)
         self.control_enabled = bool(control_enabled)
         self.iteration = self.real_steps = self.imagined_steps = 0
@@ -94,7 +94,8 @@ class SuperMimicRunner:
         self.session_iterations = 0
         self.episode_returns = torch.zeros(env.num_envs, device=self.device)
         self.episode_lengths = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
-        self.completed_episodes = deque(maxlen=100)
+        self.completed_episodes = EpisodeWindow(env.num_envs, self.device)
+        self._collection_metric_validity = {}
         self._safe_policy = None
         self._collapse_strikes = 0
         self._guard_falls = 0.0
@@ -149,6 +150,7 @@ class SuperMimicRunner:
         self.episode_returns.zero_()
         self.episode_lengths.zero_()
         self.completed_episodes.clear()
+        self._collection_metric_validity = {}
         self.replay.clear()
         self.archive.clear()
         if self.driver is not None or self.expert is not None:
@@ -166,30 +168,35 @@ class SuperMimicRunner:
         reward_sum = torch.zeros((), device=self.device)
         failure_count = torch.zeros((), device=self.device)
         timeout_count = torch.zeros((), device=self.device)
-        reset_steps = 0
+        reset_steps = torch.zeros((), dtype=torch.long, device=self.device)
         for _ in range(steps):
             observation = self.history[:, -1]
             action = self._override_actions(self.actor(self.history), self.history, observation)
             noise = cfg.action_noise * torch.randn_like(action)
             noise.masked_fill_(self.deterministic_collection_mask[:, None], 0)
             action = action + noise
-            if not torch.isfinite(action).all():
-                raise FloatingPointError("Collected actions are non-finite")
+            with self.timing.section("collection_action_check"):
+                if not torch.isfinite(action).all():
+                    raise FloatingPointError("Collected actions are non-finite")
             result = self.env.step(action)
-            self.actor.update_statistics(self.history)
-            self.replay.add(self.current, self.history, action, result)
             done = result.terminated | result.truncated
-            keep = ~done
-            if keep.any():
-                self.model.update_stats(self.current.index(keep), action[keep], result.final_state.index(keep))
-            self.episode_returns.add_(result.reward)
-            self.episode_lengths.add_(1)
-            if done.any():
-                reset_steps += 1
-                completed = torch.stack((self.episode_returns[done], self.episode_lengths[done].float()), dim=-1).cpu().tolist()
-                self.completed_episodes.extend(completed)
-            self.episode_returns.masked_fill_(done, 0)
-            self.episode_lengths.masked_fill_(done, 0)
+            with self.timing.section("collection_statistics"):
+                actor_stats = self.actor.prepare_statistics(self.history)
+                model_stats = self.model.prepare_statistics(self.current, action, result.final_state, mask=~done)
+                finite = torch.stack([stats.finite for stats in (*actor_stats, *model_stats)]).all()
+                if not finite:
+                    raise FloatingPointError("Collection normalization data contains non-finite values")
+                self.actor.apply_statistics(actor_stats)
+                self.model.apply_statistics(model_stats)
+            with self.timing.section("replay_history_write"):
+                self.replay.add(self.current, self.history, action, result)
+            with self.timing.section("collection_episodes"):
+                self.episode_returns.add_(result.reward)
+                self.episode_lengths.add_(1)
+                reset_steps.add_(done.any())
+                self.completed_episodes.append(self.episode_returns, self.episode_lengths, done)
+                self.episode_returns.masked_fill_(done, 0)
+                self.episode_lengths.masked_fill_(done, 0)
             frame = self.task.observe(result.next_state, noisy=True)
             history = append_history(self.history, frame)
             self.history = torch.where(done[:, None, None], frame[:, None].expand_as(history), history)
@@ -208,22 +215,13 @@ class SuperMimicRunner:
         metrics.update(real_reward=reward_sum / steps, failures=failure_count, timeouts=timeout_count,
                        reset_steps=reset_steps)
         metrics["episode/completed"] = failure_count + timeout_count
-        if self.completed_episodes:
-            size = len(self.completed_episodes)
-            returns = [item[0] for item in self.completed_episodes]
-            metrics["episode/return_mean"] = sum(returns) / size
-            metrics["episode/return_min"] = min(returns)
-            metrics["episode/return_max"] = max(returns)
-            metrics["episode/return_std"] = math.sqrt(sum((value - metrics["episode/return_mean"]) ** 2
-                                                         for value in returns) / size)
-            metrics["episode/length_steps_mean"] = sum(item[1] for item in self.completed_episodes) / size
-            metrics["episode/length_seconds_mean"] = metrics["episode/length_steps_mean"] * self.task.dt
-            metrics["episode/window_count"] = float(size)
+        episode_metrics, self._collection_metric_validity = self.completed_episodes.metrics(self.task.dt)
+        metrics.update(episode_metrics)
         return metrics
 
     def _priority(self, windows):
         scores = self.task.replay_priority(windows)
-        if scores.shape != windows.valid.shape[:1] or not torch.isfinite(scores).all() or (scores < 0).any():
+        if scores.shape != windows.valid.shape[:1] or not (torch.isfinite(scores) & (scores >= 0)).all():
             raise ValueError("Replay priority must be a finite nonnegative score per window")
         return scores
 
@@ -287,13 +285,14 @@ class SuperMimicRunner:
             prefill_started = time.perf_counter()
             prefill_previous_steps = self.real_steps
             prefill_falls = torch.zeros((), device=self.device)
-            prefill_reset_steps = 0
+            prefill_reset_steps = torch.zeros((), dtype=torch.long, device=self.device)
             while self.replay.size <= self.config.wm_window + 1:
                 metrics = self.collect(int(self.config.collect_steps))
                 prefill_falls += metrics["failures"]
                 prefill_reset_steps += metrics["reset_steps"]
-            self._guard_falls += read_metrics({"failures": prefill_falls}, self.device)["failures"]
-            self._guard_reset_steps += prefill_reset_steps
+            prefill = read_metrics({"failures": prefill_falls, "reset_steps": prefill_reset_steps}, self.device)
+            self._guard_falls += prefill["failures"]
+            self._guard_reset_steps += prefill["reset_steps"]
             prefill_seconds = time.perf_counter() - prefill_started
             self.elapsed += prefill_seconds
             self.prefill_real_steps += self.real_steps - prefill_previous_steps
@@ -371,7 +370,8 @@ class SuperMimicRunner:
                               "replay/archive_size": self.archive.size})
             # 计数、学习率、损失和掩码同次读取；该拷贝也等待此前记录的阶段事件。
             with self.timing.section("metric_read", cuda=False):
-                metrics = read_metrics(metrics, self.device, optional=policy_metric_names, validity=model_validity)
+                metrics = read_metrics(metrics, self.device, optional=policy_metric_names,
+                                       validity={**self._collection_metric_validity, **model_validity})
             collection_time = timer.seconds("start", "collection")
             model_time = timer.seconds("collection", "model") if model_ready else 0.0
             control_time = timer.seconds("model", "control") if enabled else 0.0

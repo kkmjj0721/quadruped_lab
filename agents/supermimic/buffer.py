@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：保存真实转移及完整历史，并构造参考终止掩码与稀有事件归档。"""
+"""内容：保存真实转移及带噪历史，支持单帧存储重建，并构造终止掩码与稀有事件归档。"""
 
 from __future__ import annotations
 
@@ -41,18 +41,33 @@ class Window:
 
 
 class Replay:
-    """完整历史以半精度保存，所有已采集时刻均可独立作为想象起点。"""
+    """以半精度保存历史，所有已采集时刻均可独立作为想象起点。
 
-    def __init__(self, spec, num_envs: int, capacity: int, device):
+    frames模式要求逐控制步连续插入：新历史移动一帧，结束后重复新回合首帧。
+    首次插入和clear后的首次插入均保留调用方传入的完整历史前缀。
+    """
+
+    def __init__(self, spec, num_envs: int, capacity: int, device, history_storage="full"):
         if capacity < 1:
             raise ValueError("Replay capacity must be positive")
+        if history_storage not in ("full", "frames"):
+            raise ValueError("Replay history storage must be 'full' or 'frames'")
         self.spec, self.num_envs, self.capacity = spec, num_envs, capacity
         self.device = torch.device(device)
+        self.history_storage = history_storage
         self.size = self.clock = 0
         self.states = self._state_storage((capacity, num_envs))
         self.actions = torch.zeros(capacity, num_envs, spec.action_dim, device=device)
-        self.histories = torch.zeros(capacity, num_envs, spec.history_length, spec.observation_dim,
-                                     device=device, dtype=torch.float16)
+        if history_storage == "full":
+            self.histories = torch.zeros(capacity, num_envs, spec.history_length, spec.observation_dim,
+                                         device=device, dtype=torch.float16)
+        else:
+            self.frame_capacity = capacity + spec.history_length - 1
+            self.observation_frames = torch.zeros(self.frame_capacity, num_envs, spec.observation_dim,
+                                                  device=device, dtype=torch.float16)
+            self.history_depth = torch.zeros(capacity, num_envs, device=device, dtype=torch.int32)
+            self.next_history_depth = torch.full((num_envs,), spec.history_length, device=device, dtype=torch.int32)
+            self.history_offsets = torch.arange(spec.history_length - 1, -1, -1, device=device)
         self.done = torch.zeros(capacity, num_envs, device=device, dtype=torch.bool)
         self.terminated = torch.zeros_like(self.done)
 
@@ -62,16 +77,29 @@ class Replay:
 
     def clear(self):
         self.size = self.clock = 0
+        if self.history_storage == "frames":
+            self.history_depth.zero_()
+            self.next_history_depth.fill_(self.spec.history_length)
 
     @torch.no_grad()
     def add(self, state: TaskState, history: Tensor, action: Tensor, result):
         slot = self.clock % self.capacity
         for field in fields(TaskState):
             getattr(self.states, field.name)[slot].copy_(getattr(state, field.name))
-        self.histories[slot].copy_(history)
         self.actions[slot].copy_(action)
         self.done[slot].copy_(result.terminated | result.truncated)
         self.terminated[slot].copy_(result.terminated)
+        if self.history_storage == "full":
+            self.histories[slot].copy_(history)
+        else:
+            if self.clock == 0:
+                # 虚拟时刻-(H-1)..-1恰好对应观测环末尾的H-1个槽。
+                self.observation_frames[self.capacity:].copy_(history[:, :-1].transpose(0, 1))
+            self.observation_frames[self.clock % self.frame_capacity].copy_(history[:, -1])
+            self.history_depth[slot].copy_(self.next_history_depth)
+            # 结束标志属于本次动作，只限制下一决策态的历史回退深度。
+            self.next_history_depth.copy_(torch.where(
+                self.done[slot], 1, (self.next_history_depth + 1).clamp_max(self.spec.history_length)))
         self.clock += 1
         self.size = min(self.size + 1, self.capacity)
 
@@ -90,8 +118,16 @@ class Replay:
             raise ValueError("Cannot sample an empty replay or nonpositive seed batch")
         rows = torch.randint(self.num_envs, (batch,), device=self.device)
         logical = torch.randint(self.size, (batch,), device=self.device)
-        slots = (self.clock - self.size + logical) % self.capacity
-        return Seed(self.states.index((slots, rows)), self.histories[slots, rows].float())
+        absolute = self.clock - self.size + logical
+        slots = absolute % self.capacity
+        if self.history_storage == "full":
+            history = self.histories[slots, rows].float()
+        else:
+            depth = self.history_depth[slots, rows]
+            back = torch.minimum(self.history_offsets[None, :], depth[:, None] - 1)
+            frame_slots = (absolute[:, None] - back) % self.frame_capacity
+            history = self.observation_frames[frame_slots, rows[:, None]].float()
+        return Seed(self.states.index((slots, rows)), history)
 
     def sample_windows(self, batch: int, horizon: int) -> Window:
         rows, starts = self._sample_indices(batch, horizon)

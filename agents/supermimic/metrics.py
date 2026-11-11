@@ -6,6 +6,48 @@ import math
 import torch
 
 
+class EpisodeWindow:
+    """在设备上保留最近100个完成回合，同步结束时按环境编号排列。"""
+
+    def __init__(self, num_envs, device):
+        self.records = torch.zeros(100, 2, dtype=torch.float64, device=device)
+        self.valid = torch.zeros(100, dtype=torch.bool, device=device)
+        self.order = torch.arange(100 + num_envs, device=device)
+
+    def clear(self):
+        self.valid.zero_()
+
+    @torch.no_grad()
+    def append(self, returns, lengths, done):
+        # 长度先转FP32，保持原cpu().tolist()之前的转换口径。
+        candidates = torch.stack((returns.double(), lengths.float().double()), dim=-1)
+        records = torch.cat((self.records, candidates))
+        valid = torch.cat((self.valid, done))
+        keys = torch.where(valid, self.order, -1)
+        selected = keys.topk(100, sorted=True).indices.flip(0)
+        self.records.copy_(records[selected])
+        self.valid.copy_(valid[selected])
+
+    def metrics(self, dt):
+        count = self.valid.sum()
+        denominator = count.clamp_min(1)
+        returns = self.records[:, 0]
+        mean = torch.where(self.valid, returns, 0).sum() / denominator
+        centered = torch.where(self.valid, returns - mean, 0)
+        lengths = torch.where(self.valid, self.records[:, 1], 0).sum() / denominator
+        metrics = {
+            "episode/return_mean": mean,
+            "episode/return_min": torch.where(self.valid, returns, torch.inf).amin(),
+            "episode/return_max": torch.where(self.valid, returns, -torch.inf).amax(),
+            "episode/return_std": (centered.square().sum() / denominator).sqrt(),
+            "episode/length_steps_mean": lengths,
+            "episode/length_seconds_mean": lengths * dt,
+            "episode/window_count": count,
+        }
+        populated = count > 0
+        return metrics, {name: populated for name in metrics}
+
+
 class ModelMetrics:
     """保留主线逐更新过滤、按总更新次数平均及全无效键缺省的语义。"""
 

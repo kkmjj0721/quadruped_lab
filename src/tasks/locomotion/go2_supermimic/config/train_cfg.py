@@ -44,6 +44,8 @@ class SuperMimicTrainConfig:
     """覆盖训练阶段详细计时开关；会话完整墙钟在两种状态均记录。"""
     timing_interval: int | None = None
     """覆盖详细阶段的采样间隔，单位为迭代；首次使用和图捕获轮强制记录。"""
+    replay_history_storage: str | None = None
+    """覆盖回放历史存储：full完整历史，frames实际带噪单帧；不改变策略输入。"""
     log_root: str = "logs/supermimic"
     experiment_name: str = "go2_supermimic"
     run_name: str = ""

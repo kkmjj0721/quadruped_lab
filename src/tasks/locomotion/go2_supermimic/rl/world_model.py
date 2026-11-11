@@ -12,7 +12,9 @@ class Go2WorldModel(WorldModel):
     """连续瞬时量按标签归一化；接触logit使用单位尺度并以概率残差监督。"""
 
     @torch.no_grad()
-    def update_stats(self, state, action, target):
-        super().update_stats(state, action, target)
-        self.output_norm.mean[CONTACT_FOUND].zero_()
-        self.output_norm.var[CONTACT_FOUND].fill_(1.0)
+    def apply_statistics(self, statistics):
+        super().apply_statistics(statistics)
+        active = statistics[1].count > 0
+        mean, variance = self.output_norm.mean[CONTACT_FOUND], self.output_norm.var[CONTACT_FOUND]
+        mean.copy_(torch.where(active, 0, mean))
+        variance.copy_(torch.where(active, 1, variance))
