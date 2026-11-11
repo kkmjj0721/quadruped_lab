@@ -39,7 +39,7 @@ class SuperMimicConfig:
     replay_capacity: int = 1000
     # 每轮平均真实控制步；2.5对应UTD=0.4，循环累计后取整。
     collect_steps: float = 2.5
-    warmup_iterations: int = 300
+    warmup_iterations: int = 0
     wm_rewarmup_iterations: int = 1500
     critic_warmup_iterations: int = 500
     wm_hidden: tuple[int, ...] = (1024, 1024, 1024)

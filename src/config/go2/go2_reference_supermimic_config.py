@@ -46,7 +46,7 @@ class Go2ReferenceCfg(BaseConfig):
         # ---------- 优化与排期 ----------
         learning_rate: float = 2e-4
         actor_lr_scale: float = 1.0
-        warmup_iterations: int = 300
+        warmup_iterations: int = 0
         wm_rewarmup_iterations: int = 1500
         critic_warmup_iterations: int = 500
         actor_ramp_iterations: int = 1000
