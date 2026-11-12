@@ -2,7 +2,7 @@
 """内容：装配 Go2 SuperMimic 训练器，持久化课程与任务配置快照。"""
 
 from contextlib import contextmanager
-from dataclasses import fields
+from dataclasses import asdict, fields
 import json
 import os
 from pathlib import Path
@@ -130,6 +130,9 @@ class Go2SuperMimicRunner(SuperMimicRunner):
         task_state = checkpoint.get("go2_task", {})
         if "curriculum" not in task_state:
             raise ValueError("Go2 SuperMimic checkpoint task metadata mismatch")
+        if continue_run and (checkpoint.get("spec") != asdict(self.spec)
+                             or task_state.get("spec_hash") != self.spec.hash):
+            raise ValueError("Go2 task or dynamics changed; use an explicit warm start instead of continue_run")
         super().load(path, continue_run=continue_run, reset_critic=reset_critic)
         if continue_run:
             self.env.resume_progress(self.iteration)

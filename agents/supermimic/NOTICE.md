@@ -2,6 +2,10 @@
 
 # SuperMimic 来源与适配
 
+Go2结构化动力学的数学实现以 [BlinkMimic@d264658 `networks.py:113-209`](https://github.com/fuyichen0725/blinkmimic/blob/d264658d6c9ce61fb52f9f0f8985a369f3ccc409/src/blinkmimic/networks.py#L113) 的广义速度增量、位置修正、旋转指数映射及物理状态误差为基准，旋转与树状FK迁自同版本 `rotations.py/kinematics.py`。已交叉核对 [InstantTrack@b9512a9](https://github.com/Huy-Quang-Dao/instantTrack/tree/b9512a96d4e82e6ddea9a6de3b03276888bbcb2c) 和 [XMimic@54860e1 `nets.py/kin.py`](https://github.com/nico-bohlinger/xmimic/tree/54860e100251fa80143627565568d5e6b0ff2c2b/xmimic)。四子步漂移权重0.625与来源一致，子步权重公式来自 [SuperMimic@abc124c `representations.py`](https://github.com/HybridRobotics/supermimic/blob/abc124c1bd5976341034668af3d12c087f2f1f55/src/supermimic/representations.py)。派生实现和完整MIT许可位于 [Go2任务MDP](../../src/tasks/locomotion/go2_supermimic/mdp/LICENSE_blinkmimic)，由本项目维护，不依赖参考仓库运行。
+
+这次迁移仅覆盖结构化动力学：Go2使用本地MJCF的髋／膝连杆原点和足端site，足速包含根部twist与关节速度；保留已有瞬时加速度、接触、力矩等独立辅助监督，保留现有网络隐藏层与RunningNorm统计机制。残差输出统计与物理误差增量统计分离，核心误差下限取BlinkMimic `train.py` 的 `ERR_FLOOR`，输出层采用其零初始化。四元数作为内部完整姿态存储，任务观测／奖励接口保持。参考为人形动作跟踪，本项目为Go2速度跟踪；结构对拍和运行检查不能证明控制效果改善。
+
 ## 8MoE主线与SuperMimic机制
 
 可选网络BF16精度采用 [BlinkMimic@d264658 `run_mlp`](https://github.com/fuyichen0725/blinkmimic/blob/d264658d6c9ce61fb52f9f0f8985a369f3ccc409/src/blinkmimic/networks.py#L64) 的局部autocast与输出转FP32边界，并参考 [XMimic@54860e1 `nets.py`](https://github.com/nico-bohlinger/xmimic/blob/54860e100251fa80143627565568d5e6b0ff2c2b/xmimic/nets.py#L43)、`fast_nets.py` 与 `tests/test_fast_equiv.py` 区分矩阵精度、状态精度及梯度差异。三个网络开关独立，Go2主线新训练默认开启BF16；归一化、状态积分、奖励、返回递推、MoE分组卷积与融合均沿用FP32。XMimic使用JAX及G1动作跟踪，本项目为PyTorch与Go2速度跟踪；不移植其跨时间步梯度合并、自定义VJP或LayerNorm，外部加速结果不代表本项目性能。

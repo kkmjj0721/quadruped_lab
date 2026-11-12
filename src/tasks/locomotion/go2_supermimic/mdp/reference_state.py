@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：定义Go2原73维状态、52维瞬时辅助量及旧航向系平面位姿增量。"""
+"""内容：定义Go2派生物理视图；完整状态在视图末尾追加四元数，由任务确定其位置。"""
 
 import torch
 from torch import Tensor
@@ -25,6 +25,9 @@ LEG_CONTACT_FORCE = slice(121, 122)
 ANGULAR_MOMENTUM = slice(122, 125)  # heading系角动量；平方和与来源world系严格等价。
 AUXILIARY = slice(73, 125)
 PHYSICAL_DIM = 125
+# 残差网络布局：位置／旋转修正、速度增量、关节修正／速度增量，共36维；随后是独立辅助量。
+GENERALIZED_DELTA_DIM = 36
+MODEL_CONTACT = slice(48, 52)
 LEG_PHYSICAL_DIM = 122
 FORCE_PHYSICAL_DIM = 121
 LEGACY_PHYSICAL_DIM = 97

@@ -15,10 +15,14 @@ from agents.supermimic.interfaces import AlgorithmSpec, TaskState
 from .reference_rewards import reference_reward_terms
 from .commands import advance_commands, heading_command, sample_commands
 from .gait_rewards import gait_phase
+from .reference_kinematics import Go2Kinematics
+from .reference_rotations import mat_to_quat, mv3, quat_to_mat
+from .structured_dynamics import ResidualDynamics
 from .reference_state import (
-    ANGULAR_BODY, AUXILIARY, CONTACT_FOUND, CONTEXT_COM, FEET, FORCE_PHYSICAL_DIM, GRAVITY, HEIGHT, JOINT_OFFSET,
+    ANGULAR_BODY, AUXILIARY, CONTACT_FOUND, CONTEXT_COM, FEET, FORCE_PHYSICAL_DIM, GENERALIZED_DELTA_DIM,
+    GRAVITY, HEIGHT, JOINT_ACCELERATION, JOINT_OFFSET, MODEL_CONTACT,
     JOINT_VELOCITY, LEGACY_PHYSICAL_DIM, LEG_PHYSICAL_DIM, PHYSICAL_DIM, POSE,
-    ROBOT_STATE, VELOCITY_HEADING, apply_pose_delta, body_planar_velocity, body_vertical_velocity, pose_delta, tracking_velocity, yaw_rotate_inverse,
+    ROBOT_STATE, VELOCITY_HEADING, body_planar_velocity, body_vertical_velocity, tracking_velocity, yaw_rotate_inverse,
 )
 from .state_spec import (
     COMMAND_TIMER, CONTEXT_ENCODER_BIAS,
@@ -46,7 +50,10 @@ class Go2ReferenceTaskModel:
         self.physical_dim = (PHYSICAL_DIM if self.him_rewards else LEG_PHYSICAL_DIM if self.leg_collision else
                              FORCE_PHYSICAL_DIM if self.force_rewards else LEGACY_PHYSICAL_DIM)
         self.auxiliary = slice(AUXILIARY.start, self.physical_dim)
+        self.root_quat = slice(self.physical_dim, self.physical_dim + 4)
         self.model_input_dim = self.physical_dim + 114
+        self.dynamics = ResidualDynamics(self.dt, cfg.control.decimation)
+        self.kinematics = Go2Kinematics(device=self.device)
         self.observation_term_dims = type(self).observation_term_dims + ((2,) if cfg.experiment.actor_phase else ())
         self.default_joint_pos = torch.as_tensor(default_joint_pos, device=self.device, dtype=torch.float32).clone()
         self.joint_limits = torch.as_tensor(joint_limits, device=self.device, dtype=torch.float32).clone()
@@ -80,12 +87,13 @@ class Go2ReferenceTaskModel:
                    "layout": ("go2_reference_state70_pose3_motion_force_leg_momentum_aux52_v7" if self.him_rewards else
                               "go2_reference_state70_pose3_motion_force_leg_aux49_v6" if self.leg_collision else
                               "go2_reference_state70_pose3_motion_force_aux48_v5" if self.force_rewards else
-                              "go2_reference_state70_pose3_motion_aux24_v4")}
+                              "go2_reference_state70_pose3_motion_aux24_v4"),
+                   "dynamics": "blinkmimic_residual_fk_quaternion_v1"}
         self.semantic_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         version = "v7" if self.him_rewards else "v6" if self.leg_collision else "v5" if self.force_rewards else "v4"
-        self.spec = AlgorithmSpec(self.physical_dim, self.physical_dim, 12, sum(self.observation_term_dims),
+        self.spec = AlgorithmSpec(self.physical_dim + 4, self.physical_dim - 45, 12, sum(self.observation_term_dims),
                                   cfg.env.num_critic_obs, 26, MEMORY_DIM, 3,
-                                  f"go2_reference_velocity_{version}:" + self.semantic_hash,
+                                  f"go2_reference_velocity_{version}_residual_fk_v1:" + self.semantic_hash,
                                   model_id="supermimic_moe_velocity_v1")
 
     def _semantic_config(self) -> dict:
@@ -128,7 +136,8 @@ class Go2ReferenceTaskModel:
                               data.joint_pos - data.default_joint_pos, data.joint_vel, *relative,
                               position[:, :2], yaw.unsqueeze(-1), data.joint_acc,
                               data.site_lin_vel_w[:, self.foot_ids, :2].flatten(1),
-                              (sensor.found > 0).to(position.dtype), *forces, *leg_force, *momentum), -1)
+                              (sensor.found > 0).to(position.dtype), *forces, *leg_force, *momentum,
+                              data.root_link_quat_w), -1)
         return physical
 
     def world_position(self, state: TaskState) -> Tensor:
@@ -253,28 +262,60 @@ class Go2ReferenceTaskModel:
                             state.memory[:, PREVIOUS_ACTION]), -1)
         return TaskState(next_physical, memory, command, state.context)
 
-    # ---------- 直接增量动力学 ----------
+    # ---------- 广义状态、残差积分与正运动学 ----------
+
+    def generalized_state(self, state: TaskState):
+        """完整姿态来自四元数；局部速度在边界转换为参考实现的世界速度。"""
+        physical = state.physical
+        rotation = quat_to_mat(physical[:, self.root_quat])
+        velocity = yaw_rotate_inverse(physical[:, VELOCITY_HEADING], -self.yaw(state))
+        return (self.world_position(state), rotation, velocity, mv3(rotation, physical[:, ANGULAR_BODY]),
+                physical[:, JOINT_OFFSET] + self.default_joint_pos, physical[:, JOINT_VELOCITY])
+
+    def physical_state(self, generalized, auxiliary: Tensor) -> Tensor:
+        """从单一广义状态生成任务视图；auxiliary为不含足速的独立瞬时量。"""
+        position, rotation, velocity, angular, joints, joint_velocity = generalized
+        quaternion = mat_to_quat(rotation)
+        rotation = quat_to_mat(quaternion)
+        yaw = torch.atan2(rotation[:, 1, 0], rotation[:, 0, 0])
+        height = position[:, 2:3] - self.surface_height(position[:, :2]).unsqueeze(-1)
+        # 以根部为原点做同一棵FK，避免绝对位置较大时相减损失相对足端精度。
+        limbs, feet_velocity = self.kinematics.forward(
+            torch.zeros_like(position), rotation, velocity, angular, joints, joint_velocity)
+        relative = yaw_rotate_inverse(limbs, yaw[:, None]).flatten(1)
+        return torch.cat((height, -rotation[:, 2, :], yaw_rotate_inverse(velocity, yaw),
+                          mv3(rotation.transpose(-1, -2), angular), joints - self.default_joint_pos, joint_velocity,
+                          relative, position[:, :2], yaw[:, None], auxiliary[:, :12],
+                          feet_velocity[:, :, :2].flatten(1), auxiliary[:, 12:], quaternion), -1)
+
+    def independent_auxiliary(self, state: TaskState) -> Tensor:
+        """瞬时加速度、接触与力等保留原标签；足速由速度运动学生成。"""
+        return torch.cat((state.physical[:, JOINT_ACCELERATION],
+                          state.physical[:, CONTACT_FOUND.start:self.physical_dim]), -1)
 
     def model_target(self, state: TaskState, next_state: TaskState) -> Tensor:
-        """原73维仍为增量；辅助瞬时量直接监督下一状态的绝对值。"""
-        return torch.cat((next_state.physical[:, ROBOT_STATE] - state.physical[:, ROBOT_STATE],
-                          pose_delta(state.physical[:, POSE], next_state.physical[:, POSE]),
-                          next_state.physical[:, self.auxiliary]), -1)
+        """沿用BlinkMimic的速度增量与位置残差目标，附加Go2独立辅助量。"""
+        return torch.cat((self.dynamics.target(self.generalized_state(state), self.generalized_state(next_state)),
+                          self.independent_auxiliary(next_state)), -1)
+
+    def model_increment(self, state: TaskState, next_state: TaskState) -> Tensor:
+        """普通物理增量只用于误差尺度统计，避免残差方差改变监督权重。"""
+        return torch.cat((self.dynamics.increments(self.generalized_state(state), self.generalized_state(next_state)),
+                          self.independent_auxiliary(next_state)), -1)
 
     def integrate(self, state: TaskState, action: Tensor, delta: Tensor) -> Tensor:
         del action
-        return torch.cat((state.physical[:, ROBOT_STATE] + delta[:, :70],
-                          apply_pose_delta(state.physical[:, POSE], delta[:, POSE]),
-                          delta[:, 73:93], delta[:, CONTACT_FOUND].sigmoid(), delta[:, 97:self.physical_dim]), -1)
+        generalized = self.dynamics.integrate(self.generalized_state(state), delta[:, :GENERALIZED_DELTA_DIM])
+        auxiliary = torch.cat((delta[:, GENERALIZED_DELTA_DIM:MODEL_CONTACT.start],
+                               delta[:, MODEL_CONTACT].sigmoid(), delta[:, MODEL_CONTACT.stop:]), -1)
+        return self.physical_state(generalized, auxiliary)
 
     def model_error(self, current: TaskState, predicted: TaskState, target: TaskState,
                     recorded_current: TaskState) -> Tensor:
-        """分别监督原状态增量与辅助绝对量；接触使用预测概率与真实标记之差。"""
-        # 预测yaw由apply_pose_delta原样累加，不wrap；大于pi的错误预测仍受到完整惩罚。
-        predicted_delta = yaw_rotate_inverse(predicted.physical[:, POSE] - current.physical[:, POSE], self.yaw(current))
-        return torch.cat((predicted.physical[:, ROBOT_STATE] - target.physical[:, ROBOT_STATE],
-                          predicted_delta - pose_delta(recorded_current.physical[:, POSE], target.physical[:, POSE]),
-                          predicted.physical[:, self.auxiliary] - target.physical[:, self.auxiliary]), -1)
+        """按目标状态坐标监督广义物理误差；接触使用预测概率残差。"""
+        del current, recorded_current
+        return torch.cat((self.dynamics.error(self.generalized_state(predicted), self.generalized_state(target)),
+                          self.independent_auxiliary(predicted) - self.independent_auxiliary(target)), -1)
 
     # ---------- 奖励、失败与稀有窗口 ----------
 

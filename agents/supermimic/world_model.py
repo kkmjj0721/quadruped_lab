@@ -138,10 +138,14 @@ class WorldModel(nn.Module):
     def loss(self, window) -> Tensor:
         return self._loss(window) if self._compiled_supervised is None else self._compiled_supervised(window)
 
+    def loss_scale(self) -> Tensor:
+        """默认沿用输出统计；残差模型可独立定义物理状态误差尺度。"""
+        return self.output_norm.var.sqrt() + 1e-6
+
     def _loss(self, window) -> Tensor:
         current = window.initial
         recorded_current = window.initial
-        scale = self.output_norm.var.sqrt() + 1e-6
+        scale = self.loss_scale()
         total = current.physical.new_zeros(())
         for step in range(window.actions.shape[1]):
             target = window.targets.index((slice(None), step))
