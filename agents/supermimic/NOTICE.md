@@ -14,7 +14,7 @@ Go2结构化动力学的数学实现以 [BlinkMimic@d264658 `networks.py:113-209
 
 各机器人在`src/config/<机器人>/*supermimic_config.py`的`algo`与`runner`段声明实际训练配方；本目录只维护共享字段定义、通用默认、校验与算法实现。CLI显式覆盖已加载配置，新增运行预算不进入任务语义指纹。
 
-CUDA更新执行方式维护在`cuda_graph.py`，由本项目已有独立性能实验迁入。工程依据实读 [BlinkMimic@d264658](https://github.com/fuyichen0725/blinkmimic/blob/d264658d6c9ce61fb52f9f0f8985a369f3ccc409/src/blinkmimic/train.py#L403) 的 `Graphed`、设备学习率及可捕获Adam，以及 [InstantTrack@b9512a9](https://github.com/Huy-Quang-Dao/instantTrack/blob/b9512a96d4e82e6ddea9a6de3b03276888bbcb2c/src/instanttrack/train.py#L455) 的预热与独立捕获流。保留本项目图外采样、归一化校验、全部优化器的非有限梯度跳步、速度监督和护栏，不迁入参考项目的G1任务、Muon、EMA、精度或训练配方。默认CUDA开启、CPU使用原执行方式；可用`--cuda-graph False`关闭，配置和限制见[Go2任务说明](../../docs/go2_supermimic.md)。
+CUDA更新执行方式维护在`cuda_graph.py`，由本项目已有独立性能实验迁入。工程依据实读 [BlinkMimic@d264658](https://github.com/fuyichen0725/blinkmimic/blob/d264658d6c9ce61fb52f9f0f8985a369f3ccc409/src/blinkmimic/train.py#L403) 的 `Graphed`、设备学习率及可捕获Adam，以及 [InstantTrack@b9512a9](https://github.com/Huy-Quang-Dao/instantTrack/blob/b9512a96d4e82e6ddea9a6de3b03276888bbcb2c/src/instanttrack/train.py#L455) 的预热与独立捕获流。保留本项目图外采样、归一化校验、全部优化器的非有限梯度跳步、速度监督和护栏，图执行适配本身不迁入参考项目的G1任务、EMA或训练配方，后续Muon接入见下文。默认CUDA开启、CPU使用原执行方式；可用`--cuda-graph False`关闭，配置和限制见[Go2任务说明](../../docs/go2_supermimic.md)。
 
 完整八步监督、critic损失与lambda-return编译由本项目`combined_cuda_graph`消融迁入主线，统一边界位于`compilation.py`，沿用原算法公式。依据[PyTorch2.14 compile API](https://docs.pytorch.org/docs/2.14/generated/torch.compile.html)固定整图与输入形状；Inductor保留半精度舍入和原生随机数消费。捕获时暂停自动循环GC的范围参考[Triton@1735801的cuda_graph_without_gc](https://github.com/triton-lang/triton/blob/173580104f6b1c182472fe0ad3e11f639fbaa177/python/triton/testing.py#L78)，finally恢复原状态，不禁用引用计数析构、不重试或吞异常。远程消融耗时是本项目观测，不能当作论文结论或迁入版本的新运行验证。
 
@@ -34,7 +34,7 @@ CUDA更新执行方式维护在`cuda_graph.py`，由本项目已有独立性能�
 - 预填与训练迭代分开：以 `int(collect_steps)` 为整数批次，循环采到回放长度大于 `wm_window+1`，默认8步窗口仍预填10步，不消耗训练累加器。模型归一化统计排除done当步。
 - lambda-return 保留参考 `surv[t+1]/clamp(surv[t],1e-6)` 的低存活数值语义；critic 每个 epoch 按 `n//critic_minibatches` 分片，余数按来源丢弃。非有限梯度跳过对应优化器更新；`nonfinite_steps` 依来源统计模型及 actor，critic 另用 `critic_skipped` 记录。非有限日志值省略并报告跳过计数，不改变终端版式。
 - 护栏每50轮判定一次，按来源对发生过任何reset的step求失败绝对数量均值，包含只有超时而跌倒数为0的reset step；没有reset的step不进入分母。依据 MjLab1.6 `manager_based_rl_env.py:434,471,614` 和 `termination_manager.py:95`，每step清空`extras["log"]`，仅reset路径输出终止统计。该值以 `guard/falls_per_reset_step` 记录。
-- `load(path, continue_run=False, reset_critic=False)` 默认热启动并从第0轮重新计时；继续训练保留迭代号。模型形状变化时保留新构造的模型，策略更新推迟至至少1500轮；critic形状变化或显式重置时，actor冻结至策略更新起点之后500轮。只恢复已载入网络的同形状优化器，不恢复回放、仿真、RNG、护栏学习率缩放或旧预热排期。
+- `load(path, continue_run=False, reset_critic=False)` 默认热启动并从第0轮重新计时；继续训练保留迭代号。模型形状变化时保留新构造的模型，策略更新推迟至至少1500轮；critic形状变化或显式重置时，actor冻结至策略更新起点之后500轮。只恢复已载入网络的同形状、同类型优化器，Muon权重衰减也须一致；不恢复回放、仿真、RNG、护栏学习率缩放或旧预热排期。
 - MoE检查点和部署格式为 `supermimic_moe_velocity_v1`／`supermimic_moe_velocity_policy_v1`；actor形状不兼容时拒绝热启动。任务语义的继续训练检查由任务装配层负责，普通热启动允许任务语义变化。短流程验证不代表速度跟踪已收敛。
 
 盲性边界：部署只输入五帧本体观测，速度由图内网络显式估计；训练用真实速度仅用于监督，不进入actor前向。地形、摩擦和COM等真值仍只用于世界模型与critic。速度标签从真实回放当前状态转换为body系，不使用世界模型想象速度作为标签。外部成绩不代表本组合已验证的效果。
@@ -48,3 +48,39 @@ CUDA更新执行方式维护在`cuda_graph.py`，由本项目已有独立性能�
 - 梯度分批（`imag_microbatch`／`critic_microbatch`）保持总想象批量、完整时间反传与优化器步数；TorchScript／ONNX 导出属于本项目工程适配，不是论文结论。
 - 继续训练额外保留真实／想象转移与实际优化器更新的累计日志计数；参考只恢复迭代号。该日志扩展不参与损失、排期或课程数学。
 - 任务奖励与机器人配置见项目 [Go2 任务说明](../../docs/go2_supermimic.md)。
+
+## PartyMimic Muon＋Adam
+
+`optim.py`的参数分组、设备学习率更新与门控派生自[PartyMimic@69c53621 `optim.py:64–162`](https://github.com/Roboparty/PartyMimic/blob/69c53621e6394f3c5dd7a923d0a93dcfcd1fb8eb/src/partymimic/optim.py#L64)，默认策略首尾Linear也使用Muon及权重衰减采用同提交[`train.py:82–121,234–247`](https://github.com/Roboparty/PartyMimic/blob/69c53621e6394f3c5dd7a923d0a93dcfcd1fb8eb/src/partymimic/train.py#L82)。该本地适配由本项目维护，不依赖参考仓库运行。
+
+Go2新训练的策略所有Linear权重用Muon，分组卷积及偏置用Adam；世界模型仅中间Linear权重用Muon；critic保留Adam。Muon沿用momentum=.95、Nesterov、5步Newton–Schulz、eps=1e-7、`match_rms_adamw`及默认weight_decay=.1；actor Adam beta=(.9,.95)，WM和critic为(.9,.999)，Adam权重衰减为0。原生更新及图内矩阵内核使用本机PyTorch2.14.1；恢复时按当前fused/capturable执行方式重建设备状态，并保留设备lr地址。
+
+来源为人形参考动作MLP，本项目为含分组卷积与速度监督的Go2 MoE，沿用来源按Linear识别的分组，不将卷积展平为Muon矩阵。来源WM的FlatAdam在本项目使用同数学定义的现有fused Adam；保留本项目WM与actor有限性跳步、梯度裁剪、学习率排期和护栏，不迁入其他训练机制。优化器数值对拍及缩减预算训练不代表上游成绩或Go2控制收益已复现。
+
+以下保留所派生代码的MIT版权与许可原文：
+
+```text
+MIT License
+
+Copyright (c) 2026 PartyMimic authors
+Copyright (c) 2026 Fuyi Chen (BlinkMimic, from which this software is derived)
+Copyright (c) 2026 Huy-Quang-Dao (InstantTrack, from which BlinkMimic is derived)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

@@ -100,6 +100,9 @@ class Go2ReferenceTaskModel:
         """以当前任务配置建立语义指纹，运行时预算不改变任务定义。"""
         config = self.cfg.to_dict()
         config["runner"] = {name: value for name, value in config["runner"].items() if name not in RUNNER_RUNTIME_FIELDS}
+        # 优化器类型在算法恢复边界核对，不改变旧策略的任务／部署语义。
+        for name in ("actor_optimizer", "wm_optimizer", "muon_weight_decay"):
+            config["algo"].pop(name)
         return config
 
     # ---------- 真实状态与坐标 ----------

@@ -534,6 +534,16 @@ class SuperMimicRunner:
         if not same["actor"]:
             raise ValueError("Actor shape changed: no warm start is defined for this observation or architecture")
         saved_learner = data.get("learner", {})
+        # 在写入任何网络参数前核对实际要恢复的优化器，避免跨类型的部分恢复。
+        for name, field in (("actor", "actor_optimizer"), ("model", "wm_optimizer")):
+            if same[name] and name in saved_learner:
+                kind = getattr(self.config, field)
+                saved_kind = getattr(saved_config, field)
+                state_kind = "muon_adam" if "muon" in saved_learner[name] else "adam"
+                if kind != saved_kind or kind != state_kind:
+                    raise ValueError(f"{name} optimizer type changed; use matching checkpoint configuration or start a new run")
+                if kind == "muon_adam" and self.config.muon_weight_decay != saved_config.muon_weight_decay:
+                    raise ValueError(f"{name} Muon weight decay changed; use matching checkpoint configuration or start a new run")
         counters = {}
         for name in ("iteration", "real_steps", "imagined_steps"):
             value = data.get(name, 0) if continue_run else 0

@@ -85,4 +85,10 @@ def configuration_for_settings(settings: dict | None = None):
     algorithm = settings.get("algorithm", "moe_history")
     if algorithm != "moe_history":
         raise ValueError(f"Unsupported SuperMimic algorithm: {algorithm}")
-    return Go2ReferenceCfg()
+    cfg = Go2ReferenceCfg()
+    sections = set(cfg.to_dict()) - {"init_member_classes", "to_dict"}
+    if sections.issubset(settings):
+        # 旧完整快照使用Adam；局部覆盖不改变Go2新训练的优化器默认。
+        for name in ("actor_optimizer", "wm_optimizer"):
+            setattr(cfg.algo, name, settings["algo"].get(name, "adam"))
+    return cfg

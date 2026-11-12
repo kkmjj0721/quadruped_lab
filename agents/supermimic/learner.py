@@ -12,6 +12,7 @@ from .buffer import Seed
 from .compilation import compile_kernel
 from .config import ExecutionConfig
 from .imagine import Imagination
+from .optim import MuonAdam
 
 
 @contextmanager
@@ -38,8 +39,10 @@ def clip_gradients(parameters, norm: float, element: float | None = None):
 
 
 def _step_if_finite(optimizer, finite):
-    """融合 Adam 在设备上跳步；显式非融合配置保留原有限性分支。"""
-    if optimizer.param_groups[0]["fused"]:
+    """按优化器执行模式跳过非有限更新，组合优化器同时保护两套状态。"""
+    if isinstance(optimizer, MuonAdam):
+        optimizer.step(ok=finite)
+    elif optimizer.param_groups[0]["fused"]:
         optimizer.found_inf = (~finite).float()
         try:
             optimizer.step()
@@ -57,9 +60,7 @@ class Learner:
         self.execution = ExecutionConfig(**asdict(execution if execution is not None else ExecutionConfig()))
         self._device_counts = torch.zeros(4, dtype=torch.int64, device=next(model.parameters()).device)
         self.reset_policy_optimizers()
-        # 关闭时沿用原默认自动选择foreach；显式False会改为单张量更新。
-        fused = True if self.execution.fused_adam else None
-        self.model_optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, fused=fused)
+        self.model_optimizer = self._make_optimizer("model")
         self.imagination = Imagination(task, actor, model, critic, config)
         self.critic_loss_kernel = (compile_kernel(self._critic_loss, config.compile_backend)
                                    if config.compile_imagination else self._critic_loss)
@@ -105,13 +106,25 @@ class Learner:
     def nonfinite_steps(self, value):
         self._device_counts[3].copy_(torch.as_tensor(value, device=self._device_counts.device))
 
+    def _make_optimizer(self, name, *, capturable=False):
+        """按网络职责选择PartyMimic分组；critic始终使用Adam。"""
+        cfg, module = self.config, getattr(self, name)
+        kind = cfg.actor_optimizer if name == "actor" else cfg.wm_optimizer if name == "model" else "adam"
+        betas = (0.9, 0.95) if name == "actor" else (0.9, 0.999)
+        # 关闭时沿用原默认自动选择foreach；显式False会改为单张量更新。
+        fused = True if self.execution.fused_adam else None
+        if kind == "muon_adam":
+            return MuonAdam(module, [module] if name == "actor" else [module.net], cfg.learning_rate,
+                            betas=betas, fused=fused, capturable=capturable, io=name == "actor",
+                            weight_decay=cfg.muon_weight_decay)
+        parameters = list(module.policy_parameters() if name == "actor" else module.parameters())
+        rate = torch.tensor(cfg.learning_rate, device=parameters[0].device) if capturable else cfg.learning_rate
+        return torch.optim.Adam(parameters, lr=rate, betas=betas, fused=fused, capturable=capturable)
+
     def reset_policy_optimizers(self):
         """重建策略和价值优化器；世界模型优化器由其独立生命周期管理。"""
-        cfg = self.config
-        fused = True if self.execution.fused_adam else None
-        self.actor_optimizer = torch.optim.Adam(self.actor.policy_parameters(), lr=cfg.learning_rate,
-                                                betas=(0.9, 0.95), fused=fused)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=cfg.learning_rate, fused=fused)
+        self.actor_optimizer = self._make_optimizer("actor")
+        self.critic_optimizer = self._make_optimizer("critic")
 
     def schedule(self, iteration: int):
         """策略斜率从冻结结束、预热结束和回滚点三者最晚处起算。"""
@@ -251,11 +264,21 @@ class Learner:
 
     def load_optimizer_state_dict(self, name, data):
         """沿用当前融合执行选项，加载原步数、动量和其余优化器参数。"""
+        optimizer = getattr(self, name + "_optimizer")
+        if isinstance(optimizer, MuonAdam):
+            optimizer.load_state_dict(data)
+            return
+        if "muon" in data:
+            raise ValueError("Cannot load MuonAdam state into Adam; use matching optimizer configuration")
         # 必须在加载前覆盖：PyTorch据此把fused Adam的step张量放到参数设备。
         fused = True if self.execution.fused_adam else None
         state = {**data, "param_groups": [{**group, "fused": fused, "capturable": False,
                                           "lr": float(group["lr"])} for group in data["param_groups"]]}
-        getattr(self, name + "_optimizer").load_state_dict(state)
+        optimizer.load_state_dict(state)
+        if not fused:
+            # PyTorch加载时保留非捕获step原设备，跨GPU/CPU恢复须回到普通Adam的CPU计数。
+            for saved in optimizer.state.values():
+                saved["step"] = saved["step"].cpu()
 
     def load_state_dict(self, data):
         for name in ("actor", "model", "critic"):

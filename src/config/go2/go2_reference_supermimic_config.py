@@ -26,11 +26,11 @@ class Go2ReferenceCfg(BaseConfig):
         archive_keep_prob: float = 0.02
 
         # ---------- 世界模型与想象 ----------
-        wm_hidden: tuple[int, ...] = (2048, 2048, 2048)
+        wm_hidden: tuple[int, ...] = (1024, 1024, 1024)
         wm_window: int = 8
         wm_batch: int = 2048
         wm_updates: int = 5
-        imag_batch: int = 4096
+        imag_batch: int = 2048
         horizon: int = 32
         gamma: float = 0.99
         lam: float = 0.95
@@ -44,8 +44,11 @@ class Go2ReferenceCfg(BaseConfig):
         velocity_loss_coef: float = 1.0  # 真实同一时刻机身线速度的MSE监督权重。
 
         # ---------- 优化与排期 ----------
-        learning_rate: float = 2e-4
-        actor_lr_scale: float = 1.0
+        learning_rate: float = 4e-4
+        actor_lr_scale: float = 4.0
+        actor_optimizer: str = "muon_adam"
+        wm_optimizer: str = "muon_adam"
+        muon_weight_decay: float = 0.1
         warmup_iterations: int = 0
         wm_rewarmup_iterations: int = 1500
         critic_warmup_iterations: int = 500

@@ -66,6 +66,9 @@ class SuperMimicConfig:
     velocity_loss_coef: float = 1.0  # 同时刻机身系xyz线速度MSE的权重，潜特征维度不包含这3维。
     learning_rate: float = 2e-4
     actor_lr_scale: float = 1.0
+    actor_optimizer: str = "adam"  # muon_adam将策略全部Linear权重交给Muon，其余参数使用Adam。
+    wm_optimizer: str = "adam"  # muon_adam仅将世界模型中间Linear权重交给Muon。
+    muon_weight_decay: float = 0.1  # PartyMimic默认值，仅作用于Muon参数组。
     actor_ramp_iterations: int = 1000
     lr_decay_iterations: int = 30000
     lr_final_frac: float = 0.03
@@ -89,6 +92,12 @@ class SuperMimicConfig:
     driver_fade: tuple[int, int] = (1_000_000_000, 1_000_000_000)
 
     def __post_init__(self):
+        for name in ("actor_optimizer", "wm_optimizer"):
+            if getattr(self, name) not in ("adam", "muon_adam"):
+                raise ValueError(f"{name} must be adam or muon_adam")
+        if (isinstance(self.muon_weight_decay, bool) or not isinstance(self.muon_weight_decay, (int, float))
+                or not math.isfinite(self.muon_weight_decay) or self.muon_weight_decay < 0):
+            raise ValueError("muon_weight_decay must be finite and nonnegative")
         positive = ("replay_capacity", "wm_window", "wm_batch",
                     "wm_updates", "imag_batch", "horizon", "lr_decay_iterations", "critic_epochs",
                     "critic_minibatches", "collapse_interval", "moe_expert_num", "moe_latent_dim")

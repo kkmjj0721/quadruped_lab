@@ -11,6 +11,7 @@ import torch
 
 from .buffer import Seed
 from .learner import Learner, _step_if_finite, clip_gradients, frozen
+from .optim import MuonAdam
 
 
 # ---------- 静态输入与实际更新预热 ----------
@@ -114,14 +115,13 @@ class CudaGraphLearner(Learner):
         self._actor_updates = {}
         self._critic_update = None
         super().__init__(task, actor, model, critic, config, execution)
-        self.model_optimizer = _capturable_adam(model.parameters(), config.learning_rate)
+        self.model_optimizer = self._make_optimizer("model", capturable=True)
         self._model_update = CapturedUpdate(self._model_core, self.device)
 
     def reset_policy_optimizers(self):
         """护栏重建优化器时同步失效旧 actor／critic 图，不动世界模型图。"""
-        cfg = self.config
-        self.actor_optimizer = _capturable_adam(self.actor.policy_parameters(), cfg.learning_rate, betas=(0.9, 0.95))
-        self.critic_optimizer = _capturable_adam(self.critic.parameters(), cfg.learning_rate)
+        self.actor_optimizer = self._make_optimizer("actor", capturable=True)
+        self.critic_optimizer = self._make_optimizer("critic", capturable=True)
         self._actor_updates = {}
         self._critic_update = None
 
@@ -136,13 +136,18 @@ class CudaGraphLearner(Learner):
     def load_optimizer_state_dict(self, name, data):
         """恢复时保留设备学习率地址，避免重放使用旧常量或旧优化器状态。"""
         optimizer = getattr(self, name + "_optimizer")
-        references = [group["lr"] for group in optimizer.param_groups]
-        state = {**data, "param_groups": [{**group, "fused": True, "capturable": True}
-                                          for group in data["param_groups"]]}
-        optimizer.load_state_dict(state)
-        for group, reference in zip(optimizer.param_groups, references, strict=True):
-            reference.copy_(torch.as_tensor(group["lr"], device=self.device))
-            group["lr"] = reference
+        if isinstance(optimizer, MuonAdam):
+            optimizer.load_state_dict(data)
+        else:
+            if "muon" in data:
+                raise ValueError("Cannot load MuonAdam state into Adam; use matching optimizer configuration")
+            references = [group["lr"] for group in optimizer.param_groups]
+            state = {**data, "param_groups": [{**group, "fused": True, "capturable": True}
+                                              for group in data["param_groups"]]}
+            optimizer.load_state_dict(state)
+            for group, reference in zip(optimizer.param_groups, references, strict=True):
+                reference.copy_(torch.as_tensor(group["lr"], device=self.device))
+                group["lr"] = reference
         # 加载会替换优化器状态存储；重建所有更新图，避免继续引用旧地址。
         self._model_update = CapturedUpdate(self._model_core, self.device)
         self._actor_updates = {}
