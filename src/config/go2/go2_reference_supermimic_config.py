@@ -137,6 +137,7 @@ class Go2ReferenceCfg(BaseConfig):
         max_iterations = 20000
         save_interval = 10000
         log_interval = 1
+        metric_interval = 10  # 设备端汇总展示指标，每10轮回读并写TensorBoard。
         imag_microbatch = 4096
         critic_microbatch = 32768
         wm_compile = True  # 编译完整八步监督及损失。

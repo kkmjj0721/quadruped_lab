@@ -8,7 +8,7 @@ import math
 RUNNER_RUNTIME_FIELDS = ("max_iterations", "save_interval", "log_interval", "imag_microbatch",
                          "critic_microbatch", "wm_compile", "fused_adam", "cuda_graph",
                          "detailed_timing", "timing_interval", "replay_history_storage",
-                         "wm_bf16", "actor_bf16", "critic_bf16")
+                         "wm_bf16", "actor_bf16", "critic_bf16", "metric_interval")
 
 
 @dataclass
@@ -19,9 +19,10 @@ class ExecutionConfig:
     critic_microbatch: int = 32768
     wm_compile: bool = True  # 完整自回归监督及损失。
     fused_adam: bool = True
-    cuda_graph: bool = True  # CUDA默认捕获更新；CPU由runner解析为False。
+    cuda_graph: bool = True  # CUDA捕获采样与更新，融合指标累计；CPU由runner解析为False。
     detailed_timing: bool = False  # 图外记录阶段事件，原有计时指标保持原义。
     timing_interval: int = 1  # 详细计时的采样轮数间隔；首次使用和图准备轮强制记录。
+    metric_interval: int = 1  # 设备指标汇总及TensorBoard写入间隔；护栏和learn返回强制完成窗口。
     replay_history_storage: str = "frames"  # 默认只保存实际带噪单帧；full保留完整历史作显式对照。
     wm_bf16: bool = False  # 仅世界模型MLP使用CUDA BF16；监督和想象共享该边界。
     actor_bf16: bool = False  # 仅策略MLP使用CUDA BF16；MoE卷积、融合与归一化保留FP32。
@@ -30,7 +31,7 @@ class ExecutionConfig:
     def __post_init__(self):
         if self.replay_history_storage not in ("full", "frames"):
             raise ValueError("replay_history_storage must be full or frames")
-        for name in ("imag_microbatch", "critic_microbatch", "timing_interval"):
+        for name in ("imag_microbatch", "critic_microbatch", "timing_interval", "metric_interval"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")

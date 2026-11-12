@@ -186,7 +186,7 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
               f"wm_compile={execution.wm_compile}, fused_adam={execution.fused_adam}, "
               f"cuda_graph={execution.cuda_graph}, detailed_timing={execution.detailed_timing}, "
               f"wm_bf16={execution.wm_bf16}, actor_bf16={execution.actor_bf16}, critic_bf16={execution.critic_bf16}, "
-              f"timing_interval={execution.timing_interval}", flush=True)
+              f"timing_interval={execution.timing_interval}, metric_interval={execution.metric_interval}", flush=True)
         # 快照反映JSON与CLI覆盖后的实际配置，普通YAML类型便于直接查看和安全回读。
         origin = json.loads(json.dumps(_run_origin(task_id, args, device, resume, source), default=str))
         origin.update(seed=cfg.env.seed, num_envs=cfg.env.num_envs)

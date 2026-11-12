@@ -1,7 +1,7 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    独立格式化SuperMimic真实采集、模型训练和想象控制日志，并逐轮写入TensorBoard标量。
+    独立格式化SuperMimic训练摘要，在调用方汇总边界写入TensorBoard标量。
 """
 
 from __future__ import annotations
@@ -140,7 +140,7 @@ def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -
 
 
 class TrainingLogger:
-    """逐轮写入TensorBoard标量，终端按迭代间隔显示并保留首轮与目标末轮。"""
+    """每次汇总写入TensorBoard，横轴为窗口末轮；终端另按迭代间隔显示。"""
 
     def __init__(self, log_dir: str | Path | None, *, num_envs: int, device, log_interval: int = 1):
         _positive_integer("num_envs", num_envs)
@@ -152,7 +152,7 @@ class TrainingLogger:
         self._records = 0
         self._writer = None
         if self.log_dir is not None:
-            # 逐轮指标集中写入同一事件文件，tag按"/"分组成TensorBoard面板。
+            # 窗口指标集中写入同一事件文件，tag按"/"分组成TensorBoard面板。
             from torch.utils.tensorboard import SummaryWriter
 
             self.log_dir.mkdir(parents=True, exist_ok=True)

@@ -53,6 +53,7 @@ class TrainingTiming:
         self._samples, self._session = {}, {}
         self._iterations, self._seen_phases = [], set()
         self._pending, self._indices = [], {}
+        self._deferred = []
         self._iteration = None
         self._sampled = False
         self._collected = False
@@ -60,6 +61,8 @@ class TrainingTiming:
     def begin_iteration(self, iteration, phase, *, setup=False):
         if not self.enabled:
             return
+        if self._pending and not self._collected:
+            self._deferred.append((self._phase, self._setup, self._pending))
         first_use = phase not in self._seen_phases
         self._seen_phases.add(phase)
         self._iteration, self._phase = iteration, phase
@@ -79,7 +82,8 @@ class TrainingTiming:
         events = None
         started = time.perf_counter()
         if cuda and self.device.type == "cuda":
-            key = name, index
+            # 同一窗口中未读取的事件不能被下一轮覆盖，完成回读后才复用槽。
+            key = len(self._deferred), name, index
             if key not in self._events:
                 self._events[key] = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
             events = self._events[key]
@@ -95,18 +99,23 @@ class TrainingTiming:
         """仅在原标量回读完成后取事件值；重复调用不重复累计。"""
         if not self.enabled:
             return {}
-        metrics = {"timing/detail/sampled": float(self._sampled), "timing/detail/setup": float(self._setup)}
-        if self._collected or not self._sampled:
+        sampled = len(self._deferred) + int(self._sampled)
+        setups = sum(setup for _, setup, _ in self._deferred) + int(self._sampled and self._setup)
+        metrics = {"timing/detail/sampled": float(sampled > 0), "timing/detail/setup": float(setups > 0),
+                   "timing/detail/sampled_iterations": sampled, "timing/detail/setup_iterations": setups}
+        if self._collected or (not self._sampled and not self._deferred):
             return metrics
-        group = self._phase + ("/setup" if self._setup else "/steady")
-        for name, host_seconds, events in self._pending:
-            values = {"host": host_seconds}
-            if events is not None:
-                values["cuda"] = events[0].elapsed_time(events[1]) / 1000
-            for clock, seconds in values.items():
-                key = f"timing/detail/{name}_{clock}_seconds"
-                metrics[key] = metrics.get(key, 0.0) + seconds
-                self._samples.setdefault((group, name, clock), []).append(seconds)
+        for phase, setup, pending in [*self._deferred, (self._phase, self._setup, self._pending)]:
+            group = phase + ("/setup" if setup else "/steady")
+            for name, host_seconds, events in pending:
+                values = {"host": host_seconds}
+                if events is not None:
+                    values["cuda"] = events[0].elapsed_time(events[1]) / 1000
+                for clock, seconds in values.items():
+                    key = f"timing/detail/{name}_{clock}_seconds"
+                    metrics[key] = metrics.get(key, 0.0) + seconds
+                    self._samples.setdefault((group, name, clock), []).append(seconds)
+        self._deferred.clear()
         self._collected = True
         return metrics
 
@@ -119,12 +128,12 @@ class TrainingTiming:
                 "timing/previous_iteration_wall_seconds": previous["wall_seconds"],
                 "timing/previous_logging_seconds": previous["logging_seconds"]}
 
-    def end_iteration(self, wall_seconds, log_seconds):
+    def end_iteration(self, wall_seconds, log_seconds, *, completed=True):
         if not self.enabled:
             return
         self._iterations.append({"iteration": self._iteration, "phase": self._phase, "setup": self._setup,
                                  "sampled": self._sampled, "wall_seconds": wall_seconds,
-                                 "logging_seconds": log_seconds})
+                                 "logging_seconds": log_seconds, "completion_boundary": completed})
         self._iteration = None
 
     def record_wall(self, name, seconds):
@@ -154,6 +163,6 @@ class TrainingTiming:
                 "stages": stages,
                 "scope": {"host": "Host call intervals; CUDA work may still be queued",
                           "cuda": "Stream event intervals including possible host submission gaps; not kernel-only time",
-                          "iteration_wall": "Host wall through original metric read, guard and logging; excludes outer save",
+                          "iteration_wall": "Host call wall; completion_boundary=false may leave device work pending; metrics_windows session wall includes boundary wait, guard and logging",
                           "sampling": "Stage statistics cover sampled calls only; no extrapolation to unsampled iterations",
                           "nesting": "Coarse model/control and save_total contain their respective detail/export children"}}

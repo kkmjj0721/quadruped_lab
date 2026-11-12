@@ -210,6 +210,11 @@ class CudaGraphLearner(Learner):
 
     def _critic_core(self, features, targets):
         cfg, optimizer = self.config, self.critic_optimizer
+        # 每次真实critic更新仅提交一次统计；断言与提交随图重放，主机不再等待actor结果。
+        statistics = self.critic.normalizer.prepare_update(features)
+        torch._assert_async(statistics.finite, "Normalization data contains non-finite values")
+        self.critic.normalizer.apply_update(statistics._replace(
+            count=torch.where(statistics.finite, statistics.count, 0)))
         minibatch = features.shape[0] // cfg.critic_minibatches
         losses, flags = [], []
         for _ in range(cfg.critic_epochs):
@@ -225,7 +230,7 @@ class CudaGraphLearner(Learner):
                     value_loss += weighted_loss.detach()
                     del partial_loss, weighted_loss
                 gradient = clip_gradients(self.critic.parameters(), cfg.grad_clip)
-                finite = torch.isfinite(gradient)
+                finite = torch.isfinite(gradient) & statistics.finite
                 _step_if_finite(optimizer, finite)
                 losses.append(value_loss)
                 flags.append(finite)
@@ -255,8 +260,7 @@ class CudaGraphLearner(Learner):
             if not freeze_actor:
                 self.actor_updates.add_(finite)
         with timing.section("critic_prepare") if timing is not None else nullcontext():
-            # 归一化统计和原有输入有限性校验留在图外，时序与主线一致。
-            self.critic.normalizer.update(features)
+            # 这里只处理静态形状和图对象；归一化及有限性断言在critic图中先于优化执行。
             minibatch = features.shape[0] // self.config.critic_minibatches
             if minibatch == 0:
                 raise ValueError("Imagined transitions must fill at least one row per critic minibatch")

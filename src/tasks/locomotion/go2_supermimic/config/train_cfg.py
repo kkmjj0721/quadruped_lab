@@ -29,7 +29,9 @@ class SuperMimicTrainConfig:
     save_interval: int | None = None
     """覆盖runner保存间隔；最后一轮也保存，塌缩护栏预警时跳过该保存点。"""
     log_interval: int | None = None
-    """覆盖终端分区日志间隔；TensorBoard仍逐轮保存。"""
+    """覆盖终端分区日志间隔；仅在指标汇总完成的轮次打印。"""
+    metric_interval: int | None = None
+    """覆盖设备指标汇总及TensorBoard写入间隔；首轮、护栏与返回边界强制汇总。"""
     imag_microbatch: int | None = None
     """覆盖单次想象反传的种子数上限；未指定时沿用runner配置。"""
     critic_microbatch: int | None = None
