@@ -94,24 +94,38 @@ class Learner:
     def improve(self, seed):
         config, execution = self.config, self.execution
         batch = seed.history.shape[0]
+        # 任务输出是监督边界，整批校验一次后各微批沿用同一组真实标签。
+        with torch.no_grad():
+            target_velocity = self.task.body_linear_velocity(seed.state).detach()
+        if target_velocity.shape != (batch, 3) or target_velocity.dtype != torch.float32 or target_velocity.device != seed.history.device:
+            raise ValueError("Body velocity targets must have shape [batch, 3], float32 dtype and the seed device")
+        if not torch.isfinite(target_velocity).all():
+            raise FloatingPointError("Body velocity targets are non-finite")
         self.model_optimizer.zero_grad(set_to_none=True)
         self.actor_optimizer.zero_grad(set_to_none=True)
         self.critic_optimizer.zero_grad(set_to_none=True)
         features, targets = [], []
         control_loss = seed.history.new_zeros(())
         reward_mean = control_loss.clone()
+        velocity_mse_axes = seed.history.new_zeros(3)
         with frozen(self.model, self.actor.encoder, self.critic):
             for start in range(0, batch, execution.imag_microbatch):
                 stop = min(batch, start + execution.imag_microbatch)
-                imagined = self.imagination.rollout(seed.index(slice(start, stop)))
+                part = seed.index(slice(start, stop))
+                imagined = self.imagination.rollout(part)
                 weight = (stop - start) / batch
-                loss = -imagined.objective.mean()
+                policy_loss = -imagined.objective.mean()
+                _, velocity = self.actor.encode_history(part.history)
+                # 标签来自回放当前真实状态；不以想象速度或下一状态代替同一时刻监督。
+                velocity_error = (velocity - target_velocity[start:stop]).square()
+                loss = policy_loss + config.velocity_loss_coef * velocity_error.mean()
                 _backward(loss * weight)
-                control_loss += loss.detach() * weight
+                control_loss += policy_loss.detach() * weight
+                velocity_mse_axes += velocity_error.detach().mean(0) * weight
                 reward_mean += imagined.rewards.mean() * weight
                 features.append(imagined.features[:, :-1].flatten(0, 1))
                 targets.append(self.imagination.lambda_returns(imagined).flatten())
-                del imagined, loss
+                del imagined, loss, policy_loss, velocity, velocity_error, part
             actor_gradient = _clip(self.actor_parameters, config.grad_clip, config.actor_grad_value)
             self.actor_optimizer.step()
             self.actor_updates += 1
@@ -134,5 +148,9 @@ class Learner:
                 self.critic_optimizer.step()
                 self.critic_updates += 1
                 value_loss += minibatch_loss / minibatches
-        return {"control_loss": control_loss, "critic_loss": value_loss,
-                "actor_grad_norm": actor_gradient, "imagined_reward": reward_mean}
+        velocity_loss = velocity_mse_axes.mean()
+        return {"control_loss": control_loss, "velocity_loss": velocity_loss,
+                "actor_loss": control_loss + config.velocity_loss_coef * velocity_loss,
+                "velocity_rmse": velocity_loss.sqrt(),
+                **{f"velocity_rmse_{axis}": value for axis, value in zip(("x", "y", "z"), velocity_mse_axes.sqrt())},
+                "critic_loss": value_loss, "actor_grad_norm": actor_gradient, "imagined_reward": reward_mean}

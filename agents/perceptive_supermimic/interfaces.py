@@ -30,7 +30,7 @@ class AlgorithmSpec:
     contact_dim: int = 0
     history_length: int = 5
     depth_shape: tuple[int, int, int] = (1, 64, 64)
-    model_id: str = "perceptive_supermimic_latent_v1"
+    model_id: str = "perceptive_supermimic_moe_velocity_v2"
 
     def __post_init__(self):
         for name in ("state_dim", "delta_dim", "action_dim", "observation_dim", "privileged_dim", "model_input_dim", "history_length"):
@@ -45,7 +45,7 @@ class AlgorithmSpec:
         if len(shape) != 3 or any(isinstance(x, bool) or not isinstance(x, int) for x in shape) or shape[0] != 1 or min(shape[1:]) < 8:
             raise ValueError("Depth shape must be (1, height, width), with both spatial dimensions >= 8")
         object.__setattr__(self, "depth_shape", shape)
-        if not self.semantic_id or not self.depth_semantic_id or self.model_id != "perceptive_supermimic_latent_v1":
+        if not self.semantic_id or not self.depth_semantic_id or self.model_id != "perceptive_supermimic_moe_velocity_v2":
             raise ValueError("Missing task/depth semantics or unsupported algorithm format")
 
     @property
@@ -167,6 +167,9 @@ class Task(Protocol):
     def model_error(self, recorded: TaskState, predicted: TaskState, target: TaskState) -> Tensor: ...
     def integrate(self, state: TaskState, action: Tensor, delta: Tensor) -> TaskState: ...
     def observe(self, state: TaskState, *, noisy: bool) -> Tensor: ...
+    def body_linear_velocity(self, state: TaskState) -> Tensor:
+        """返回同一时刻的机身系xyz线速度[B,3]，float32、m/s且与状态同设备。"""
+        ...
     def privileged(self, state: TaskState, latent: Tensor) -> Tensor: ...
     def soft_termination(self, prediction: ModelPrediction) -> Tensor: ...
     def reward(self, state: TaskState, action: Tensor, prediction: ModelPrediction, failure: Tensor) -> Tensor: ...

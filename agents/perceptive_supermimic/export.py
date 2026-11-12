@@ -20,7 +20,7 @@ def _prepare_policy(actor, iteration: int, metadata):
         if (normalizer.var < 0).any() or normalizer.count <= 0:
             raise ValueError("Invalid policy normalization statistics")
     information = {
-        "format": "perceptive_supermimic_policy_v1",
+        "format": "perceptive_supermimic_moe_velocity_policy_v2",
         "model_id": actor.model_id,
         "iteration": iteration,
         "spec": json.loads(actor.spec_json),
@@ -42,6 +42,13 @@ def _prepare_policy(actor, iteration: int, metadata):
         "action_clip": actor.action_clip,
         "action_mapping": "defined_by_task_semantic_id",
         "latent_dim": actor.latent_dim,
+        "history_encoder": {"type": "mixture_of_experts", "experts": actor.moe_expert_num,
+                            "latent_dim": actor.proprio_latent_dim, "velocity_dim": actor.velocity_dim,
+                            "latent_normalization": "l2_after_expert_mixture"},
+        "velocity_estimate": {"frame": "body", "units": "m/s", "components": ["vx", "vy", "vz"],
+                              "supervision": "same_time_real_state_mse"},
+        "actor_input_order": actor.input_order,
+        "actor_input_dim": actor.proprio_latent_dim + actor.velocity_dim + actor.observation_dim + actor.latent_dim,
     }
     if metadata is not None:
         overlap = set(information).intersection(metadata)

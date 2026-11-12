@@ -36,7 +36,9 @@ class PerceptiveConfig:
     horizon: int = 32
     latent_dim: int = 32
     proprio_latent_dim: int = 32
-    history_hidden: tuple[int, ...] = (256, 128)
+    moe_expert_num: int = 8
+    history_hidden: tuple[int, ...] = (512, 256, 128)
+    velocity_loss_coef: float = 1.0  # 回放当前机身系xyz线速度的MSE权重，速度不参与潜特征归一化。
     actor_hidden: tuple[int, ...] = (512, 256, 128)
     critic_hidden: tuple[int, ...] = (512, 256, 128)
     wm_hidden: tuple[int, ...] = (1024, 1024, 1024)
@@ -60,7 +62,7 @@ class PerceptiveConfig:
 
     def __post_init__(self):
         positive = ("replay_capacity", "image_capacity", "warmup_steps", "wm_window", "wm_batch", "wm_updates",
-                    "imag_batch", "horizon", "latent_dim", "proprio_latent_dim", "reconstruction_images",
+                    "imag_batch", "horizon", "latent_dim", "proprio_latent_dim", "moe_expert_num", "reconstruction_images",
                     "lr_decay_iterations", "critic_epochs", "critic_minibatches", "log_interval", "save_interval")
         for name in positive + ("wm_only_iterations",):
             value = getattr(self, name)
@@ -71,7 +73,7 @@ class PerceptiveConfig:
             if not widths or any(isinstance(x, bool) or not isinstance(x, int) or x < 1 for x in widths):
                 raise ValueError(f"{name} must contain positive integer widths")
             object.__setattr__(self, name, widths)
-        for name in ("collect_steps", "learning_rate", "grad_clip", "actor_grad_value", "action_clip", "reconstruction_weight"):
+        for name in ("collect_steps", "learning_rate", "grad_clip", "actor_grad_value", "action_clip", "reconstruction_weight", "velocity_loss_coef"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
