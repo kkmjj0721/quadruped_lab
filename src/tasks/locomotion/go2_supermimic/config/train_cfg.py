@@ -46,6 +46,12 @@ class SuperMimicTrainConfig:
     """覆盖详细阶段的采样间隔，单位为迭代；首次使用和图捕获轮强制记录。"""
     replay_history_storage: str | None = None
     """覆盖回放历史存储：full完整历史，frames实际带噪单帧；不改变策略输入。"""
+    wm_bf16: bool | None = None
+    """覆盖世界模型MLP的BF16开关；需要原生BF16 CUDA设备，输出及状态积分仍为FP32。"""
+    actor_bf16: bool | None = None
+    """覆盖策略MLP的BF16开关；归一化、MoE分组卷积、门控融合仍为FP32。"""
+    critic_bf16: bool | None = None
+    """覆盖价值MLP的BF16开关；输出、价值损失和返回递推仍为FP32。"""
     log_root: str = "logs/supermimic"
     experiment_name: str = "go2_supermimic"
     run_name: str = ""

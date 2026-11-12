@@ -25,6 +25,10 @@ from typing import Literal
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.runtime import configure_dependency_warnings
+
+configure_dependency_warnings()
+
 import mjlab
 import tyro
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg

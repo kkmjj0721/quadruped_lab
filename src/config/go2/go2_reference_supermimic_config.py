@@ -134,8 +134,8 @@ class Go2ReferenceCfg(BaseConfig):
     class runner:
         """本机器人的训练目标、保存节奏与执行预算；命令行可显式覆盖。"""
 
-        max_iterations = 40000
-        save_interval = 1000
+        max_iterations = 20000
+        save_interval = 10000
         log_interval = 1
         imag_microbatch = 4096
         critic_microbatch = 32768
@@ -145,6 +145,9 @@ class Go2ReferenceCfg(BaseConfig):
         detailed_timing = False  # 可显式开启图外采样／更新细分，原有阶段计时继续保留。
         timing_interval = 1  # 正整数；图准备及首次阶段强制采样，其余按此轮数间隔记录。
         replay_history_storage = "frames"  # 默认压缩带噪历史；full保留完整存储作显式对照。
+        wm_bf16 = True  # 世界模型MLP默认使用CUDA BF16，监督与想象一致。
+        actor_bf16 = True  # 策略MLP默认使用CUDA BF16，MoE卷积仍为FP32。
+        critic_bf16 = True  # 价值MLP默认使用CUDA BF16，输出与返回递推仍为FP32。
         enable_control_updates = True
         standing_zero_noise = True  # 站立命令采集关闭额外动作噪声，保留固定无噪声组。
 

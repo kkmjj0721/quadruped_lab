@@ -4,6 +4,8 @@
 
 ## 8MoE主线与SuperMimic机制
 
+可选网络BF16精度采用 [BlinkMimic@d264658 `run_mlp`](https://github.com/fuyichen0725/blinkmimic/blob/d264658d6c9ce61fb52f9f0f8985a369f3ccc409/src/blinkmimic/networks.py#L64) 的局部autocast与输出转FP32边界，并参考 [XMimic@54860e1 `nets.py`](https://github.com/nico-bohlinger/xmimic/blob/54860e100251fa80143627565568d5e6b0ff2c2b/xmimic/nets.py#L43)、`fast_nets.py` 与 `tests/test_fast_equiv.py` 区分矩阵精度、状态精度及梯度差异。三个网络开关独立，Go2主线新训练默认开启BF16；归一化、状态积分、奖励、返回递推、MoE分组卷积与融合均沿用FP32。XMimic使用JAX及G1动作跟踪，本项目为PyTorch与Go2速度跟踪；不移植其跨时间步梯度合并、自定义VJP或LayerNorm，外部加速结果不代表本项目性能。
+
 训练使用 `moe_history`、默认8个专家，检查点格式为 `supermimic_moe_velocity_v1`。本目录作为本项目源码维护，不依赖参考项目的Python运行环境。
 
 各机器人在`src/config/<机器人>/*supermimic_config.py`的`algo`与`runner`段声明实际训练配方；本目录只维护共享字段定义、通用默认、校验与算法实现。CLI显式覆盖已加载配置，新增运行预算不进入任务语义指纹。

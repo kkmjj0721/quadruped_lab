@@ -93,6 +93,7 @@ class WorldModel(nn.Module):
         self.net = nn.Sequential(*layers)
         self.input_norm = RunningNorm(task.model_input_dim)
         self.output_norm = RunningNorm(task.spec.delta_dim)
+        self.use_bf16 = False
         self._compiled_supervised = None
 
     def configure_supervised_compile(self, *, enabled: bool, backend: str):
@@ -121,7 +122,15 @@ class WorldModel(nn.Module):
     def forward(self, state: TaskState, action: Tensor, recorded_current: TaskState | None = None) -> TaskState:
         inputs = (self.task.model_input(state, action) if recorded_current is None
                   else self.task.supervised_model_input(state, action, recorded_current))
-        delta = self.output_norm.unnormalize(self.net(self.input_norm(inputs)))
+        normalized = self.input_norm(inputs)
+        if self.use_bf16:
+            # 仅网络参与混合精度；反归一化及任务状态推进保持 FP32。
+            with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
+                network_delta = self.net(normalized)
+            network_delta = network_delta.float()
+        else:
+            network_delta = self.net(normalized)
+        delta = self.output_norm.unnormalize(network_delta)
         physical = self.task.integrate(state, action, delta)
         # 监督推进仍消费命令采样随机数；完整损失编译不得删除这些副作用。
         return self.task.advance(state, action, physical)

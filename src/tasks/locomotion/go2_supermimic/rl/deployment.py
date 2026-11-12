@@ -109,6 +109,12 @@ def export_checkpoint(checkpoint_path: str | Path, directory: str | Path, *, ite
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_moe_velocity_v1":
         raise ValueError(f"Not a SuperMimic checkpoint: {path}")
+    execution = checkpoint.get("execution", {})
+    if not isinstance(execution, dict):
+        raise ValueError("Checkpoint execution configuration must be an object")
+    actor_bf16 = execution.get("actor_bf16", False)
+    if not isinstance(actor_bf16, bool):
+        raise ValueError("Checkpoint execution.actor_bf16 must be a boolean")
     # 任务快照与播放共用同一份可信来源和同一套覆盖规则。
     snapshot_path = path.parent / "task_config.json"
     settings, wrapped = read_settings(snapshot_path)
@@ -128,5 +134,8 @@ def export_checkpoint(checkpoint_path: str | Path, directory: str | Path, *, ite
     iteration = checkpoint["iteration"] if iteration is None else iteration
     if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
         raise ValueError("Export iteration must be a nonnegative integer")
+    metadata = deployment_metadata(cfg, spec_hash=checkpoint["spec_hash"], algorithm=algorithm)
+    # 离线重建的 actor 使用 FP32；训练来源精度由检查点执行配置保留。
+    metadata["source_network_precision"] = "bf16" if actor_bf16 else "fp32"
     return export_policy(actor, Path(directory).expanduser().resolve(), iteration=iteration,
-                         metadata=deployment_metadata(cfg, spec_hash=checkpoint["spec_hash"], algorithm=algorithm))
+                         metadata=metadata)

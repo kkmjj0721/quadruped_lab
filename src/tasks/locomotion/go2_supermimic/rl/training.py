@@ -23,6 +23,7 @@ from mjlab.utils.torch import configure_torch_backends
 
 from agents.supermimic.config import ExecutionConfig, RUNNER_RUNTIME_FIELDS
 from agents.supermimic.timing import TrainingTiming
+from src.runtime import configure_cuda_libdevice
 
 from ..config.loading import (
     apply_settings as _apply_settings, read_settings as _read_settings,
@@ -141,6 +142,7 @@ def _run_origin(task_id: str, args: SuperMimicTrainConfig, device: str, resume: 
             "arguments": asdict(args), "device": device, "resume_from": resume,
             "task_config_source": source, "command": list(sys.argv), "python": sys.version,
             "torch": torch.__version__,
+            "triton_libdevice_path": os.environ.get("TRITON_LIBDEVICE_PATH"),
             "packages": {name: version(name) for name in ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "tensorboard")},
             "workspace": workspace}
 
@@ -152,6 +154,8 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     cfg, resume, source = _resolve_task_config(task_id, args)
     runtime = cfg.runner
     device = _resolve_device(args.device)
+    if torch.device(device).type == "cuda":
+        configure_cuda_libdevice()
     log_root = (Path(args.log_root).expanduser() / args.experiment_name).resolve()
     name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
     if args.run_name:
@@ -181,6 +185,7 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
               f"imag_microbatch={execution.imag_microbatch}, critic_microbatch={execution.critic_microbatch}, "
               f"wm_compile={execution.wm_compile}, fused_adam={execution.fused_adam}, "
               f"cuda_graph={execution.cuda_graph}, detailed_timing={execution.detailed_timing}, "
+              f"wm_bf16={execution.wm_bf16}, actor_bf16={execution.actor_bf16}, critic_bf16={execution.critic_bf16}, "
               f"timing_interval={execution.timing_interval}", flush=True)
         # 快照反映JSON与CLI覆盖后的实际配置，普通YAML类型便于直接查看和安全回读。
         origin = json.loads(json.dumps(_run_origin(task_id, args, device, resume, source), default=str))

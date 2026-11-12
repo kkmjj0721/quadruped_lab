@@ -25,8 +25,14 @@ class Mlp(nn.Module):
         if last_activation:
             layers.append(nn.ELU())
         self.network = nn.Sequential(*layers)
+        self.use_bf16 = False
 
     def forward(self, values: Tensor) -> Tensor:
+        if self.use_bf16:
+            # 恢复 FP32 后再进入专家卷积、门控融合、归一化或任务计算。
+            with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
+                outputs = self.network(values)
+            return outputs.float()
         return self.network(values)
 
 

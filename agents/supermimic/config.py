@@ -7,7 +7,8 @@ import math
 
 RUNNER_RUNTIME_FIELDS = ("max_iterations", "save_interval", "log_interval", "imag_microbatch",
                          "critic_microbatch", "wm_compile", "fused_adam", "cuda_graph",
-                         "detailed_timing", "timing_interval", "replay_history_storage")
+                         "detailed_timing", "timing_interval", "replay_history_storage",
+                         "wm_bf16", "actor_bf16", "critic_bf16")
 
 
 @dataclass
@@ -22,6 +23,9 @@ class ExecutionConfig:
     detailed_timing: bool = False  # 图外记录阶段事件，原有计时指标保持原义。
     timing_interval: int = 1  # 详细计时的采样轮数间隔；首次使用和图准备轮强制记录。
     replay_history_storage: str = "frames"  # 默认只保存实际带噪单帧；full保留完整历史作显式对照。
+    wm_bf16: bool = False  # 仅世界模型MLP使用CUDA BF16；监督和想象共享该边界。
+    actor_bf16: bool = False  # 仅策略MLP使用CUDA BF16；MoE卷积、融合与归一化保留FP32。
+    critic_bf16: bool = False  # 仅价值MLP使用CUDA BF16；输出和返回递推保留FP32。
 
     def __post_init__(self):
         if self.replay_history_storage not in ("full", "frames"):
@@ -30,7 +34,7 @@ class ExecutionConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("wm_compile", "fused_adam", "cuda_graph", "detailed_timing"):
+        for name in ("wm_compile", "fused_adam", "cuda_graph", "detailed_timing", "wm_bf16", "actor_bf16", "critic_bf16"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean")
 

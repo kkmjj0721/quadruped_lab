@@ -20,7 +20,7 @@ from .config import ExecutionConfig, SuperMimicConfig
 from .exploration import stratified_collection_mask
 from .learner import Learner
 from .metrics import EpisodeWindow, ModelMetrics, read_metrics
-from .policy import Critic, make_actor
+from .policy import Critic, Mlp, make_actor
 from .timing import PhaseTimer, TrainingTiming
 from .world_model import WorldModel
 
@@ -55,6 +55,12 @@ class SuperMimicRunner:
         self.device = torch.device(env.device)
         self.config = SuperMimicConfig(**asdict(config))
         self.execution = ExecutionConfig(**asdict(execution)) if execution is not None else ExecutionConfig()
+        if self.execution.wm_bf16 or self.execution.actor_bf16 or self.execution.critic_bf16:
+            if self.device.type != "cuda":
+                raise ValueError("BF16 network execution requires a native BF16 CUDA device")
+            with torch.cuda.device(self.device):
+                if not torch.cuda.is_bf16_supported(including_emulation=False):
+                    raise ValueError("BF16 network execution requires native BF16 support on the selected CUDA device")
         self.execution.cuda_graph = self.execution.cuda_graph and self.device.type == "cuda"
         self.timing = TrainingTiming(self.device, enabled=self.execution.detailed_timing,
                                      interval=self.execution.timing_interval)
@@ -75,8 +81,13 @@ class SuperMimicRunner:
         self.actor = make_actor(self.spec, cfg, self.task.observation_term_dims).to(self.device)
         self.policy = self.actor
         self.model = self._make_world_model().to(self.device)
-        self.model.configure_supervised_compile(enabled=self.execution.wm_compile, backend=cfg.compile_backend)
         self.critic = Critic(self.spec.privileged_dim, cfg.critic_hidden).to(self.device)
+        self.model.use_bf16 = self.execution.wm_bf16
+        for module, enabled in ((self.actor, self.execution.actor_bf16), (self.critic, self.execution.critic_bf16)):
+            for layer in module.modules():
+                if isinstance(layer, Mlp):
+                    layer.use_bf16 = enabled
+        self.model.configure_supervised_compile(enabled=self.execution.wm_compile, backend=cfg.compile_backend)
         self.learner = self._make_learner()
         self.replay = Replay(self.spec, env.num_envs, cfg.replay_capacity, self.device,
                              history_storage=self.execution.replay_history_storage)
@@ -410,7 +421,7 @@ class SuperMimicRunner:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {"format": self.spec.model_id, "spec": asdict(self.spec), "spec_hash": self.spec.hash,
-                "config": asdict(self.config), "control_enabled": self.control_enabled,
+                "config": asdict(self.config), "execution": asdict(self.execution), "control_enabled": self.control_enabled,
                 "actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "world_model": self.model.state_dict(),
                 "learner": self.learner.state_dict(), "iteration": self.iteration, "real_steps": self.real_steps,
                 "imagined_steps": self.imagined_steps, "rng": torch.get_rng_state(),
