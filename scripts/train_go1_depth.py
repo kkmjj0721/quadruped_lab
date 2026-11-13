@@ -8,6 +8,7 @@
     .venv/bin/python scripts/train_go1_depth.py --stage 2 --stage1-run logs/supermimic/go1_depth/stage1 --output logs/supermimic/go1_depth/stage2
 """
 
+import logging
 from pathlib import Path
 import sys
 
@@ -22,4 +23,5 @@ from src.tasks.locomotion.go1_depth.cli import train_main
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     train_main()
