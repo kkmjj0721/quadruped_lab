@@ -9,8 +9,9 @@ from pathlib import Path
 import torch
 
 from agents.perceptive_supermimic import ExecutionConfig, PerceptiveConfig, PerceptiveRunner
-from src.config.go1_depth.go1_depth_locomotion_config import Go1LocomotionConfig
-from src.config.go1_depth.go1_depth_supermimic_config import make_algorithm_config, make_mgdp_algorithm_config, make_execution_config
+from src.config.go1_depth.go1_depth_config import (
+    Go1LocomotionConfig, Go1MGDPConfig, make_algorithm_config, make_mgdp_algorithm_config, make_execution_config,
+)
 
 from .rl.adapter import Go1DepthEnv
 from .rl.evaluation import compare_trajectories
@@ -24,7 +25,6 @@ def load_configuration(checkpoint):
     if "moe_expert_num" in data["algorithm"]:
         raise ValueError("MoE configurations are incompatible with the visual-clock v4 actor")
     if data["algorithm"].get("perception_model") == "mgdp":
-        from src.config.go1_depth.go1_mgdp_config import Go1MGDPConfig
         environment = Go1MGDPConfig(**data["environment"])
     else:
         environment = Go1LocomotionConfig(**data["environment"])
@@ -59,7 +59,6 @@ def train_main():
         environment = Go1LocomotionConfig(**{key: getattr(args, key) for key in ("num_envs", "seed", "terrain") if getattr(args, key) is not None})
         algorithm, execution = make_algorithm_config(perception=not args.baseline), make_execution_config()
     else:
-        from src.config.go1_depth.go1_mgdp_config import Go1MGDPConfig
         if args.terrain is not None or args.baseline:
             parser.error("MGDP stages define terrain and perception objectives; terrain/baseline require --legacy")
         if args.stage1_run:

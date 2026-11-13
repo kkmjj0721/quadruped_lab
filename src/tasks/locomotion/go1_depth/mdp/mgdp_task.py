@@ -43,6 +43,7 @@ class MGDPTask(Go1DepthTask):
         semantics = {
             "mujoco_integrator": cfg.physics_integrator,
             "implicit_rne": "upstream_PR1663_positive_bias_derivative",
+            "collision_affine": "translated_dominant_projection_sum1_v1",
             "randomized_links": RANDOMIZED_LINK_NAMES,
             "joint_velocity_limit": {"rad_s": JOINT_VELOCITY_LIMIT, "timing": "after_PD_before_integration;root_unchanged;end_speed_unclipped"},
             "reference": "MGDP_f43139d", "stage": cfg.stage, "dt": self.dt,

@@ -12,7 +12,8 @@ from mjlab.utils.lab_api.math import quat_apply_inverse
 
 from agents.perceptive_supermimic.interfaces import Decision, EnvStep, TaskState, VisualObservation
 from src.assets.robots.go1_depth.go1_mgdp_constants import JOINT_NAMES, JOINT_VELOCITY_LIMIT
-from src.config.go1_depth.go1_mgdp_config import Go1MGDPConfig
+from src.config.go1_depth.go1_depth_config import Go1MGDPConfig
+from src.sim.mjwarp_affine import configure_mjwarp_affine
 from src.sim.mjwarp_implicit import configure_mjwarp_implicit
 from src.terrain.mgdp import MgdpTerrainQuery, generate_mgdp_terrain
 
@@ -27,6 +28,7 @@ class MGDPGo1DepthEnv:
     """50Hz 物理推进与全局 10Hz 相机分离，先保存 final 再选择性重置。"""
 
     def __init__(self, cfg=None, device="cuda:0", latent_dim=64, *, render_mode=None):
+        configure_mjwarp_affine()
         self.cfg = cfg or Go1MGDPConfig()
         if self.cfg.physics_integrator == "implicit":
             configure_mjwarp_implicit()

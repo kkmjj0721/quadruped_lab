@@ -15,7 +15,7 @@ import torch
 
 from agents.perceptive_supermimic import PerceptiveRunner
 from agents.perceptive_supermimic.export import export_policy
-from src.config.go1_depth.go1_depth_supermimic_config import IMAGINATION_HORIZON
+from src.config.go1_depth.go1_depth_config import IMAGINATION_HORIZON
 
 from .adapter import Go1DepthEnv
 from .evaluation import compare_trajectories, evaluate_closed_loop, plot_trajectory_comparison, replay_heldout_trajectories

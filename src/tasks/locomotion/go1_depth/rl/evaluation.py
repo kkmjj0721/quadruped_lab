@@ -9,7 +9,7 @@ import torch
 
 from agents.perceptive_supermimic.interfaces import append_history
 from agents.perceptive_supermimic.interfaces import TaskState
-from src.config.go1_depth.go1_depth_supermimic_config import IMAGINATION_HORIZON
+from src.config.go1_depth.go1_depth_config import IMAGINATION_HORIZON
 
 
 @torch.no_grad()

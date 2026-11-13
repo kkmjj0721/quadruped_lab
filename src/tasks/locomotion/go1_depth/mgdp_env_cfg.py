@@ -24,7 +24,7 @@ from src.assets.robots.go1_depth.go1_mgdp_constants import (
     JOINT_NAMES, LEG_CONTACT_NAMES, LEG_SENSOR_NAME, RANDOMIZED_LINK_NAMES,
     get_go1_mgdp_camera_cfg, get_go1_mgdp_robot_cfg,
 )
-from src.config.go1_depth.go1_mgdp_config import Go1MGDPConfig
+from src.config.go1_depth.go1_depth_config import Go1MGDPConfig
 from src.terrain.mgdp import MgdpTerrainData, make_mgdp_terrain_cfg
 from .mdp.mgdp_randomization import MGDPJointActionCfg, make_mgdp_dynamics_event
 

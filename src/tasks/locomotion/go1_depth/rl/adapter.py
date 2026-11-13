@@ -8,7 +8,7 @@ from mjlab.envs import ManagerBasedRlEnv
 
 from agents.perceptive_supermimic.interfaces import Decision, EnvStep, ModelPrediction, TaskState, VisualObservation
 from src.assets.robots.go1_depth.go1_depth_constants import JOINT_NAMES
-from src.config.go1_depth.go1_depth_locomotion_config import Go1LocomotionConfig
+from src.config.go1_depth.go1_depth_config import Go1LocomotionConfig
 
 from ..env_cfg import make_env_cfg
 from ..mdp.depth import process_depth
