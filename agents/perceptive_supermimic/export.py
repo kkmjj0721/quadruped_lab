@@ -16,11 +16,10 @@ def _prepare_policy(actor, iteration: int, metadata):
         raise ValueError("Export iteration must be a nonnegative integer")
     if any(not torch.isfinite(tensor).all() for tensor in actor.state_dict().values()):
         raise ValueError("Cannot export non-finite policy tensors")
-    for normalizer in (actor.normalizer, actor.frame_normalizer):
-        if (normalizer.var < 0).any() or normalizer.count <= 0:
-            raise ValueError("Invalid policy normalization statistics")
+    if (actor.normalizer.var < 0).any() or actor.normalizer.count <= 0:
+        raise ValueError("Invalid policy normalization statistics")
     information = {
-        "format": "perceptive_supermimic_moe_velocity_policy_v2",
+        "format": "perceptive_supermimic_mlp_velocity_policy_v3",
         "model_id": actor.model_id,
         "iteration": iteration,
         "spec": json.loads(actor.spec_json),
@@ -36,19 +35,26 @@ def _prepare_policy(actor, iteration: int, metadata):
         "history_order": "frame_major_oldest_first",
         "history_reset": "repeat_initial_frame",
         "depth_input": "task_processed_values_in_0_1",
-        "normalization": {"statistics_in_graph": True, "split": "history_and_current_frame",
+        "normalization": {"statistics_in_graph": True, "history": "exclude_command_then_flatten",
+                          "command": "task_units_without_running_normalization",
                           "formula": "clamp((x-mean)/(sqrt(var)+1e-6),-10,10)"},
+        "command_indices": actor.command_indices.cpu().tolist(),
+        "proprioceptive_indices": actor.proprio_indices.cpu().tolist(),
         "action_transform": "identity_after_symmetric_clip",
         "action_clip": actor.action_clip,
         "action_mapping": "defined_by_task_semantic_id",
         "latent_dim": actor.latent_dim,
-        "history_encoder": {"type": "mixture_of_experts", "experts": actor.moe_expert_num,
+        "history_encoder": {"type": "mlp", "hidden_dims": list(actor.history_hidden), "activation": "elu",
                             "latent_dim": actor.proprio_latent_dim, "velocity_dim": actor.velocity_dim,
-                            "latent_normalization": "l2_after_expert_mixture"},
+                            "latent_normalization": "none"},
+        "visual_projector": {"input_dim": actor.latent_dim, "hidden_dims": list(actor.visual_hidden),
+                             "output_dim": actor.visual_policy_dim, "activation": "elu",
+                             "gradient_boundary": "detach_visual_input_then_train_projection"},
         "velocity_estimate": {"frame": "body", "units": "m/s", "components": ["vx", "vy", "vz"],
                               "supervision": "same_time_real_state_mse"},
         "actor_input_order": actor.input_order,
-        "actor_input_dim": actor.proprio_latent_dim + actor.velocity_dim + actor.observation_dim + actor.latent_dim,
+        "actor_input_dim": actor.proprio_latent_dim + actor.velocity_dim + actor.command_dim + actor.visual_policy_dim,
+        "actor_hidden_dims": list(actor.actor_hidden),
     }
     if metadata is not None:
         overlap = set(information).intersection(metadata)

@@ -27,10 +27,11 @@ class AlgorithmSpec:
     context_dim: int = 0
     memory_dim: int = 0
     command_dim: int = 0
+    command_indices: tuple[int, ...] = ()
     contact_dim: int = 0
     history_length: int = 5
     depth_shape: tuple[int, int, int] = (1, 64, 64)
-    model_id: str = "perceptive_supermimic_moe_velocity_v2"
+    model_id: str = "perceptive_supermimic_mlp_velocity_v3"
 
     def __post_init__(self):
         for name in ("state_dim", "delta_dim", "action_dim", "observation_dim", "privileged_dim", "model_input_dim", "history_length"):
@@ -45,7 +46,13 @@ class AlgorithmSpec:
         if len(shape) != 3 or any(isinstance(x, bool) or not isinstance(x, int) for x in shape) or shape[0] != 1 or min(shape[1:]) < 8:
             raise ValueError("Depth shape must be (1, height, width), with both spatial dimensions >= 8")
         object.__setattr__(self, "depth_shape", shape)
-        if not self.semantic_id or not self.depth_semantic_id or self.model_id != "perceptive_supermimic_moe_velocity_v2":
+        indices = tuple(self.command_indices)
+        if (len(indices) != self.command_dim or len(set(indices)) != len(indices)
+                or any(isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < self.observation_dim for index in indices)
+                or len(indices) >= self.observation_dim):
+            raise ValueError("Command indices must uniquely locate every command component inside the observation")
+        object.__setattr__(self, "command_indices", indices)
+        if not self.semantic_id or not self.depth_semantic_id or self.model_id != "perceptive_supermimic_mlp_velocity_v3":
             raise ValueError("Missing task/depth semantics or unsupported algorithm format")
 
     @property

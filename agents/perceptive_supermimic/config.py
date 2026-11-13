@@ -36,10 +36,11 @@ class PerceptiveConfig:
     horizon: int = 32
     latent_dim: int = 32
     proprio_latent_dim: int = 32
-    moe_expert_num: int = 8
-    history_hidden: tuple[int, ...] = (512, 256, 128)
+    history_hidden: tuple[int, ...] = (256, 128)
+    visual_hidden: tuple[int, ...] = (64, 64)
+    visual_policy_dim: int = 32
     velocity_loss_coef: float = 1.0  # 回放当前机身系xyz线速度的MSE权重，速度不参与潜特征归一化。
-    actor_hidden: tuple[int, ...] = (512, 256, 128)
+    actor_hidden: tuple[int, ...] = (256, 128, 64)
     critic_hidden: tuple[int, ...] = (512, 256, 128)
     wm_hidden: tuple[int, ...] = (1024, 1024, 1024)
     reconstruction_images: int = 512
@@ -67,13 +68,13 @@ class PerceptiveConfig:
 
     def __post_init__(self):
         positive = ("replay_capacity", "image_capacity", "warmup_steps", "wm_window", "wm_batch", "wm_updates",
-                    "imag_batch", "horizon", "latent_dim", "proprio_latent_dim", "moe_expert_num", "reconstruction_images",
+                    "imag_batch", "horizon", "latent_dim", "proprio_latent_dim", "visual_policy_dim", "reconstruction_images",
                     "lr_decay_iterations", "critic_epochs", "critic_minibatches", "log_interval", "save_interval")
         for name in positive + ("wm_only_iterations",):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < (1 if name in positive else 0):
                 raise ValueError(f"Invalid integer budget: {name}")
-        for name in ("history_hidden", "actor_hidden", "critic_hidden", "wm_hidden"):
+        for name in ("history_hidden", "visual_hidden", "actor_hidden", "critic_hidden", "wm_hidden"):
             widths = tuple(getattr(self, name))
             if not widths or any(isinstance(x, bool) or not isinstance(x, int) or x < 1 for x in widths):
                 raise ValueError(f"{name} must contain positive integer widths")
