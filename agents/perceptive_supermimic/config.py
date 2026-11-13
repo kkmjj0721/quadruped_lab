@@ -46,6 +46,11 @@ class PerceptiveConfig:
     contact_weight: float = 1.0
     latent_weight: float = 1.0
     reconstruction_weight: float = 1.0
+    depth_reconstruction_loss: str = "l1"
+    height_reconstruction_weight: float = 0.0
+    contrastive_weight: float = 0.0
+    contrastive_temperature: float = 0.1
+    height_shape: tuple[int, int] = (17, 11)
     gamma: float = 0.99
     lam: float = 0.95
     learning_rate: float = 2e-4
@@ -73,13 +78,14 @@ class PerceptiveConfig:
             if not widths or any(isinstance(x, bool) or not isinstance(x, int) or x < 1 for x in widths):
                 raise ValueError(f"{name} must contain positive integer widths")
             object.__setattr__(self, name, widths)
-        for name in ("collect_steps", "learning_rate", "grad_clip", "actor_grad_value", "action_clip", "reconstruction_weight", "velocity_loss_coef"):
+        for name in ("collect_steps", "learning_rate", "grad_clip", "actor_grad_value", "action_clip", "reconstruction_weight",
+                     "velocity_loss_coef", "contrastive_temperature"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
         if self.collect_steps < 1:
             raise ValueError("collect_steps must be >= 1")
-        for name in ("action_noise", "contact_weight", "latent_weight"):
+        for name in ("action_noise", "contact_weight", "latent_weight", "height_reconstruction_weight", "contrastive_weight"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
@@ -93,3 +99,9 @@ class PerceptiveConfig:
             raise ValueError("Replay and image capacities cannot hold the model window")
         if self.warmup_steps < self.wm_window or self.critic_minibatches > self.imag_batch * self.horizon:
             raise ValueError("Warmup or imagined batch cannot fill the configured windows/minibatches")
+        shape = tuple(self.height_shape)
+        if len(shape) != 2 or any(isinstance(value, bool) or not isinstance(value, int) or value < 8 for value in shape):
+            raise ValueError("Height shape must contain two integer dimensions >= 8")
+        object.__setattr__(self, "height_shape", shape)
+        if self.depth_reconstruction_loss not in ("l1", "mse"):
+            raise ValueError("Depth reconstruction loss must be l1 or mse")

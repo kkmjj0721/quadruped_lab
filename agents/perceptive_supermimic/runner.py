@@ -15,6 +15,7 @@ from .config import ExecutionConfig, PerceptiveConfig
 from .interfaces import append_history, validate_decision
 from .learner import Learner
 from .policy import Critic, PerceptiveActor
+from .terrain_perception import TerrainPerception
 from .vision import DepthDecoder, DepthEncoder
 from .world_model import WorldModel
 
@@ -56,7 +57,13 @@ class PerceptiveRunner:
         self.actor = PerceptiveActor(self.spec, config, self.encoder).to(self.device)
         self.model = WorldModel(self.task, config).to(self.device)
         self.critic = Critic(self.spec.privileged_dim, config.critic_hidden).to(self.device)
-        self.learner = Learner(self.task, self.actor, self.model, self.critic, self.decoder, config, self.execution)
+        self.terrain_perception = None
+        if config.height_reconstruction_weight or config.contrastive_weight:
+            if not callable(getattr(self.task, "terrain_height", None)):
+                raise ValueError("Terrain perception requires Task.terrain_height(state)")
+            self.terrain_perception = TerrainPerception(config.height_shape, config.latent_dim).to(self.device)
+        self.learner = Learner(self.task, self.actor, self.model, self.critic, self.decoder, config, self.execution,
+                               terrain_perception=self.terrain_perception)
         self.replay = Replay(self.spec, env.num_envs, config.replay_capacity, config.image_capacity, self.device)
         self.log_dir = Path(log_dir) if log_dir is not None else None
         self.iteration = self.real_steps = self.imagined_steps = 0
@@ -168,6 +175,8 @@ class PerceptiveRunner:
                                 **{f"{name}_updates": getattr(self.learner, f"{name}_updates") for name in ("model", "actor", "critic")}},
                    "torch_rng": torch.get_rng_state(),
                    "cuda_rng": torch.cuda.get_rng_state(self.device) if self.device.type == "cuda" else None}
+        if self.terrain_perception is not None:
+            payload["terrain_perception"] = self.terrain_perception.state_dict()
         with TemporaryDirectory(prefix=".perceptive_checkpoint_", dir=destination.parent) as temporary:
             pending = Path(temporary) / "model.pt"
             torch.save(payload, pending)
@@ -182,6 +191,10 @@ class PerceptiveRunner:
         if payload["config"] != asdict(self.config):
             raise ValueError("Checkpoint algorithm configuration does not match")
         modules = {"actor": self.actor, "model": self.model, "critic": self.critic, "decoder": self.decoder}
+        if ("terrain_perception" in payload) != (self.terrain_perception is not None):
+            raise ValueError("Checkpoint terrain perception module does not match")
+        if self.terrain_perception is not None:
+            modules["terrain_perception"] = self.terrain_perception
         # 在写入任何网络前核对完整权重布局，避免把形状兼容误当成任务兼容。
         for name, module in modules.items():
             current = module.state_dict()

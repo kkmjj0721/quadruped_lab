@@ -11,6 +11,7 @@ from agents.supermimic.learner import frozen
 
 from .config import ExecutionConfig
 from .imagine import Imagination
+from .terrain_perception import contrastive_loss
 
 
 def _backward(loss):
@@ -31,10 +32,13 @@ def _clip(parameters, norm, value=None):
 class Learner:
     """微批只降低激活峰值；整批监督、目标与优化器步数保持一致。"""
 
-    def __init__(self, task, actor, model, critic, decoder, config, execution=None):
+    def __init__(self, task, actor, model, critic, decoder, config, execution=None, *, terrain_perception=None):
         self.task, self.actor, self.model, self.critic, self.decoder = task, actor, model, critic, decoder
         self.config, self.execution = config, execution or ExecutionConfig()
+        self.terrain_perception = terrain_perception
         self.model_parameters = list(chain(model.parameters(), actor.encoder.parameters(), decoder.parameters()))
+        if terrain_perception is not None:
+            self.model_parameters.extend(terrain_perception.parameters())
         self.actor_parameters = list(actor.policy_parameters())
         self.critic_parameters = list(critic.parameters())
         self.model_optimizer = torch.optim.Adam(self.model_parameters, lr=config.learning_rate)
@@ -54,16 +58,62 @@ class Learner:
     def _encode(self, images):
         return torch.cat([self.actor.encoder(part) for part in images.split(self.execution.vision_batch)], 0)
 
+    def _fit_perception(self, images, clean, heights):
+        """先求整批对比特征梯度，再微批重算；负样本池和累计梯度不随微批大小改变。"""
+        config, execution = self.config, self.execution
+        count = images.shape[0]
+        metrics = {name: images.new_zeros(()) for name in ("reconstruction", "height_reconstruction", "contrastive")}
+        if config.contrastive_weight:
+            visual = self._encode(images).requires_grad_()
+            with torch.no_grad():
+                terrain = torch.cat([self.terrain_perception.encoder(part) for part in heights.split(execution.vision_batch)], 0)
+            terrain.requires_grad_()
+            contrastive = contrastive_loss(visual, terrain, config.contrastive_temperature)
+            visual_gradient, terrain_gradient = torch.autograd.grad(contrastive, (visual, terrain))
+            metrics["contrastive"] = contrastive.detach()
+        for start in range(0, count, execution.vision_batch):
+            stop = min(count, start + execution.vision_batch)
+            weight = (stop - start) / count
+            visual = self.actor.encoder(images[start:stop])
+            error = self.decoder(visual) - clean[start:stop]
+            reconstruction = error.abs().mean() if config.depth_reconstruction_loss == "l1" else error.square().mean()
+            loss = config.reconstruction_weight * reconstruction * weight
+            metrics["reconstruction"] += reconstruction.detach() * weight
+            if self.terrain_perception is not None:
+                terrain = self.terrain_perception.encoder(heights[start:stop])
+                height_loss = (self.terrain_perception.reconstruct(terrain) - heights[start:stop]).square().mean()
+                loss = loss + config.height_reconstruction_weight * height_loss * weight
+                metrics["height_reconstruction"] += height_loss.detach() * weight
+                if config.contrastive_weight:
+                    # 特征梯度已含整批均值，不能再乘微批权重；此内积只用于恢复参数梯度。
+                    loss = loss + config.contrastive_weight * (
+                        (visual * visual_gradient[start:stop]).sum() + (terrain * terrain_gradient[start:stop]).sum())
+            _backward(loss)
+        return metrics
+
     def fit_model(self, window):
         config, execution = self.config, self.execution
         batch, steps = window.valid.shape
+        # 图像与高度都取有效终态；静态场景由任务按同一位姿重算，标签不参与反传。
+        indices = window.valid.flatten().nonzero().flatten()
+        indices = indices[torch.randperm(indices.numel(), device=indices.device)[:config.reconstruction_images]]
+        images = window.depth_next.flatten(0, 1)[indices]
+        clean = window.depth_next_clean.flatten(0, 1)[indices]
+        heights = None
+        if self.terrain_perception is not None:
+            with torch.no_grad():
+                heights = self.task.terrain_height(window.targets.index((indices // steps, indices % steps))).detach()
+            if heights.shape != (indices.numel(), 1, *config.height_shape) or heights.dtype != torch.float32 or heights.device != images.device:
+                raise ValueError("Terrain height targets must match [batch,1,*height_shape], float32 dtype and the image device")
+            if not torch.isfinite(heights).all() or ((heights < -1) | (heights > 1)).any():
+                raise ValueError("Terrain height targets must be finite and normalized to [-1,1]")
         # 同一次优化的潜变量目标由同一版CNN产生，统计在任何反传之前统一更新。
         initial = self._encode(window.depth)
         targets = self._encode(window.depth_next.flatten(0, 1)).reshape(batch, steps, -1)
         self.model.update_stats(window, initial, targets)
         self.model_optimizer.zero_grad(set_to_none=True)
         total_steps = window.valid.sum()
-        metrics = {name: window.actions.new_zeros(()) for name in ("physical", "contact", "latent", "reconstruction")}
+        metrics = {name: window.actions.new_zeros(()) for name in ("physical", "contact", "latent")}
         for start in range(0, batch, execution.wm_microbatch):
             stop = min(batch, start + execution.wm_microbatch)
             part = window.index(slice(start, stop))
@@ -73,22 +123,14 @@ class Learner:
             _backward(loss * weight)
             for name, value in losses.items():
                 metrics[name] += value.detach() * weight
-        # 只从有效转移挑图，噪声输入和干净标签来自同一测量；不对重复历史像素重建。
-        indices = window.valid.flatten().nonzero().flatten()
-        indices = indices[torch.randperm(indices.numel(), device=indices.device)[:config.reconstruction_images]]
-        images = window.depth_next.flatten(0, 1)[indices]
-        clean = window.depth_next_clean.flatten(0, 1)[indices]
-        for start in range(0, indices.numel(), execution.vision_batch):
-            stop = min(indices.numel(), start + execution.vision_batch)
-            reconstruction = (self.decoder(self.actor.encoder(images[start:stop])) - clean[start:stop]).abs().mean()
-            weight = (stop - start) / indices.numel()
-            _backward(config.reconstruction_weight * reconstruction * weight)
-            metrics["reconstruction"] += reconstruction.detach() * weight
+        metrics.update(self._fit_perception(images, clean, heights))
         metrics["model_grad_norm"] = _clip(self.model_parameters, config.grad_clip)
         self.model_optimizer.step()
         self.model_updates += 1
         metrics["model_loss"] = (metrics["physical"] + config.contact_weight * metrics["contact"]
-                                 + config.latent_weight * metrics["latent"] + config.reconstruction_weight * metrics["reconstruction"])
+                                 + config.latent_weight * metrics["latent"] + config.reconstruction_weight * metrics["reconstruction"]
+                                 + config.height_reconstruction_weight * metrics["height_reconstruction"]
+                                 + config.contrastive_weight * metrics["contrastive"])
         return metrics
 
     def improve(self, seed):
