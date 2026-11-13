@@ -1,6 +1,8 @@
 # Copyright (c) 2026-2027 zh
 """内容：组合Go1本地单阶段视觉训练预算，固定32步想象与8步模型监督。"""
 
+from dataclasses import replace
+
 from agents.perceptive_supermimic.config import ExecutionConfig, PerceptiveConfig
 
 
@@ -25,3 +27,8 @@ def make_algorithm_config(*, perception: bool = True) -> PerceptiveConfig:
 def make_execution_config() -> ExecutionConfig:
     """分块改变峰值显存，不改变逻辑批次和32步展开长度。"""
     return ExecutionConfig(wm_microbatch=16, vision_batch=16, imag_microbatch=8, critic_microbatch=128)
+
+
+def make_mgdp_algorithm_config() -> PerceptiveConfig:
+    """两阶段共用的 MGDP 感知与 SuperMimic 配置；阶段只改变任务分布。"""
+    return replace(make_algorithm_config(), perception_model="mgdp", latent_dim=64, action_clip=100.0)

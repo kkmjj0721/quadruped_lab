@@ -19,7 +19,7 @@ def _prepare_policy(actor, iteration: int, metadata):
     if (actor.normalizer.var < 0).any() or actor.normalizer.count <= 0:
         raise ValueError("Invalid policy normalization statistics")
     information = {
-        "format": "perceptive_supermimic_mlp_velocity_policy_v3",
+        "format": "perceptive_supermimic_visual_clock_policy_v4",
         "model_id": actor.model_id,
         "iteration": iteration,
         "spec": json.loads(actor.spec_json),
@@ -35,8 +35,11 @@ def _prepare_policy(actor, iteration: int, metadata):
         "history_order": "frame_major_oldest_first",
         "history_reset": "repeat_initial_frame",
         "depth_input": "task_processed_values_in_0_1",
+        "visual_clock": {"interval_control_steps": json.loads(actor.spec_json)["visual_interval"],
+                         "stack_order": "oldest_first", "reset": "repeat_new_frame",
+                         "hold": "reuse_processed_stack_until_next_acquisition"},
         "normalization": {"statistics_in_graph": True, "history": "exclude_command_then_flatten",
-                          "command": "task_units_without_running_normalization",
+                          "command": "task_observation_scaling_without_running_normalization",
                           "formula": "clamp((x-mean)/(sqrt(var)+1e-6),-10,10)"},
         "command_indices": actor.command_indices.cpu().tolist(),
         "proprioceptive_indices": actor.proprio_indices.cpu().tolist(),

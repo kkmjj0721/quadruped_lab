@@ -23,7 +23,8 @@ def compare_trajectories(env, actor, model, directory, *, batches: int = 4) -> d
     records = {key: [] for key in ("real_states", "model_states", "actions", "valid", "terminated", "truncated",
                                    "position_error", "velocity_error", "joint_error", "rotation_error", "latent_error",
                                    "tracking_error", "rewards")}
-    initial_data = {key: [] for key in ("initial_memory", "initial_command", "initial_context", "initial_depth", "target_depths")}
+    initial_data = {key: [] for key in ("initial_memory", "initial_command", "initial_context", "initial_depth", "target_depths",
+                                       "target_memory", "target_command", "target_context")}
     for _ in range(batches):
         decision = env.reset()
         state = decision.state.detached_clone()
@@ -46,9 +47,12 @@ def compare_trajectories(env, actor, model, directory, *, batches: int = 4) -> d
         real_states = [decision.state.physical.clone()]
         values = {key: [] for key in records if key not in ("real_states", "model_states", "actions")}
         target_depths = []
+        target_state = {name: [] for name in ("memory", "command", "context")}
         for step, action in enumerate(actions):
             result = env.step(action)
             actual = result.final.state
+            for name in target_state:
+                target_state[name].append(getattr(actual, name).cpu().numpy().copy())
             # 同一TaskState布局，仅替换物理量用于误差读取；指令和上下文沿用采集初态。
             predicted_state = decision.state.detached_clone()
             predicted_state.physical = imagined_states[step + 1]
@@ -78,6 +82,8 @@ def compare_trajectories(env, actor, model, directory, *, batches: int = 4) -> d
         for name, value in values.items():
             records[name].append(torch.stack(value, 1).cpu().numpy())
         initial_data["target_depths"].append(np.stack(target_depths, axis=1))
+        for name, values in target_state.items():
+            initial_data[f"target_{name}"].append(np.stack(values, axis=1))
     arrays = {name: np.concatenate(value, axis=0) for name, value in records.items()}
     arrays.update({name: np.concatenate(value, axis=0) for name, value in initial_data.items()})
     valid = arrays["valid"]
@@ -123,7 +129,8 @@ def replay_heldout_trajectories(task, actor, model, source, directory) -> dict:
         predicted = model(state, latent, actions[:, step])
         state, latent = predicted.state, predicted.latent
         model_states.append(state.physical.clone())
-        actual = TaskState(real[:, step + 1], actions[:, step], tensor("initial_command"), tensor("initial_context"))
+        actual = TaskState(real[:, step + 1], tensor("target_memory")[:, step],
+                           tensor("target_command")[:, step], tensor("target_context")[:, step])
         target_latent = actor.encoder(depths[:, step])
         errors = {
             "position_error": (task.world_position(state) - task.world_position(actual)).norm(dim=-1),
@@ -180,3 +187,62 @@ def plot_trajectory_comparison(before: dict, after: dict, path) -> None:
     figure.suptitle("Go1留出轨迹32步对照：相同真实起点与动作，终止后排除", fontproperties=font)
     figure.savefig(path, dpi=150)
     plt.close(figure)
+
+
+@torch.no_grad()
+def evaluate_closed_loop(env, actor, directory):
+    """每环境完整评估一个真实闭环回合，结束后排除该行，分别报告地形类别。
+
+    距离超过半块长度只表示原版课程的晋级条件，不等同于障碍通过率。
+    """
+    decision = env.reset()
+    task, batch = env.task, env.num_envs
+    history = decision.observation.proprio[:, None].repeat(1, task.spec.history_length, 1)
+    initial = task.world_position(decision.state).clone()
+    context = decision.state.context.clone()
+    active = torch.ones(batch, dtype=torch.bool, device=env.device)
+    steps = torch.zeros(batch, device=env.device)
+    reward_sum, velocity_error, yaw_error = (torch.zeros_like(steps) for _ in range(3))
+    failed = torch.zeros_like(active)
+    timeout = torch.zeros_like(active)
+    final_position = initial.clone()
+    for _ in range(env.max_steps + 2):
+        action = actor(history, decision.observation.depth)
+        result = env.step(action)
+        actual = result.final.state
+        velocity = task.body_linear_velocity(actual)
+        steps += active
+        reward_sum += result.reward * active
+        velocity_error += (velocity[:, :2] - actual.command[:, :2]).square().mean(-1) * active
+        yaw_error += (actual.physical[:, 12] - actual.command[:, 2]).square() * active
+        final_position[active] = task.world_position(actual)[active]
+        failed |= result.terminated & active
+        timeout |= result.truncated & active & ~result.terminated
+        active &= ~(result.terminated | result.truncated)
+        decision = result.next
+        history = append_history(history, decision.observation.proprio)
+        if not active.any():
+            break
+    if active.any():
+        raise AssertionError("Closed-loop evaluation did not finish all first episodes")
+    distance = (final_position[:, :2] - initial[:, :2]).norm(dim=-1)
+    rows = []
+    for index in range(batch):
+        rows.append({"environment": index, "terrain_class": int(context[index, 4]) if context.shape[1] == 17 else None,
+                     "terrain_level": int(context[index, 5]) if context.shape[1] == 17 else None,
+                     "steps": int(steps[index]), "return": float(reward_sum[index]),
+                     "tracking_linear_rmse": float((velocity_error[index] / steps[index]).sqrt()),
+                     "tracking_yaw_rmse": float((yaw_error[index] / steps[index]).sqrt()),
+                     "distance_from_spawn_m": float(distance[index]), "failed": bool(failed[index]),
+                     "timeout": bool(timeout[index])})
+    summary = {"action_source": "real_closed_loop_policy_without_action_exploration",
+               "episodes": batch, "failure_fraction": float(failed.float().mean()),
+               "timeout_fraction": float(timeout.float().mean()), "mean_return": float(reward_sum.mean()),
+               "tracking_linear_rmse": float((velocity_error.sum() / steps.sum()).sqrt()),
+               "tracking_yaw_rmse": float((yaw_error.sum() / steps.sum()).sqrt()),
+               "mean_duration_s": float(steps.mean() * task.dt), "rows": rows,
+               "obstacle_success_verified": False}
+    output = Path(directory)
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    return summary

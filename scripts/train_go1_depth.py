@@ -1,10 +1,11 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    启动Go1单阶段MGDP感知与SuperMimic训练，想象固定32步。
+    启动Go1两阶段MGDP感知与SuperMimic训练，想象固定32步。
 
 用法：
-    .venv/bin/python scripts/train_go1_depth.py --output logs/supermimic/go1_depth/local --num-envs 16 --verify
+    .venv/bin/python scripts/train_go1_depth.py --stage 1 --output logs/supermimic/go1_depth/stage1 --num-envs 20
+    .venv/bin/python scripts/train_go1_depth.py --stage 2 --stage1-run logs/supermimic/go1_depth/stage1 --output logs/supermimic/go1_depth/stage2
 """
 
 from pathlib import Path

@@ -1,0 +1,30 @@
+# Copyright (c) 2026-2027 zh
+"""内容：集中定义 MGDP Go1 物理状态、奖励记忆和外生上下文的槽位。"""
+
+POSITION = slice(0, 3)
+QUATERNION = slice(3, 7)
+LINEAR_WORLD = slice(7, 10)
+ANGULAR_BODY = slice(10, 13)
+JOINT_POSITION = slice(13, 25)
+JOINT_VELOCITY = slice(25, 37)
+TORQUES = slice(37, 49)
+FOOT_FORCES = slice(49, 61)
+BODY_FORCES = slice(61, 88)
+REWARD_LINEAR_BODY = slice(88, 91)
+PHYSICAL_DIM = 91
+DELTA_DIM = 90
+
+PREVIOUS_ACTION = slice(0, 12)
+AIR_TIME = slice(12, 16)
+LAST_CONTACT = slice(16, 20)
+CAMERA_PHASE = 20
+MEMORY_DIM = 21
+
+ORIGIN = slice(0, 3)
+FAMILY = 3
+TERRAIN_CLASS = 4
+LEVEL = 5
+GLOBAL_STEP = 6
+DYNAMICS = slice(7, 16)
+TARGET_HEADING = 16
+CONTEXT_DIM = 17

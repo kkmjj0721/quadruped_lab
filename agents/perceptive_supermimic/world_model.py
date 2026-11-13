@@ -38,7 +38,11 @@ class WorldModel(nn.Module):
         output = self.net(torch.cat((features, (latent - self.z_mean) / self.z_std), dim=-1))
         delta, contacts, dz = output.split((self.spec.delta_dim, self.spec.contact_dim, self.latent_dim), dim=-1)
         predicted = self.task.integrate(state, action, self.output_norm.unnormalize(delta))
-        return ModelPrediction(predicted, latent + dz * self.dz_std, contacts)
+        updated = latent + dz * self.dz_std
+        if self.spec.visual_interval > 1:
+            capture = state.memory[:, self.spec.visual_phase_index] == self.spec.visual_interval - 1
+            updated = torch.where(capture[:, None], updated, latent)
+        return ModelPrediction(predicted, updated, contacts)
 
     @torch.no_grad()
     def update_stats(self, window: VisualWindow, initial_latent: Tensor, target_latents: Tensor):
@@ -48,11 +52,15 @@ class WorldModel(nn.Module):
         self.output_norm.update(self.task.model_target(current, target))
         latent = target_latents[valid]
         previous = torch.cat((initial_latent[:, None], target_latents[:, :-1]), dim=1)
-        dz = (target_latents - previous)[valid]
+        capture = valid
+        if self.spec.visual_interval > 1:
+            capture = valid & (window.states.memory[..., self.spec.visual_phase_index] == self.spec.visual_interval - 1)
+        dz = (target_latents - previous)[capture]
         # 本次完整窗口的统计固定后再分批反传，潜变量逐维归一化不依赖分批大小。
         self.z_mean.lerp_(latent.mean(0), 0.01)
         self.z_std.lerp_(latent.std(0, correction=0).clamp_min(1e-3), 0.01)
-        self.dz_std.lerp_(dz.square().mean(0).sqrt().clamp_min(1e-3), 0.01)
+        if dz.shape[0]:
+            self.dz_std.lerp_(dz.square().mean(0).sqrt().clamp_min(1e-3), 0.01)
 
     def loss(self, window: VisualWindow, initial_latent: Tensor, target_latents: Tensor) -> dict[str, Tensor]:
         current, latent = window.initial, initial_latent.detach()

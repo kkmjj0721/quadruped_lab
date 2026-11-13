@@ -31,7 +31,10 @@ class AlgorithmSpec:
     contact_dim: int = 0
     history_length: int = 5
     depth_shape: tuple[int, int, int] = (1, 64, 64)
-    model_id: str = "perceptive_supermimic_mlp_velocity_v3"
+    image_height_shape: tuple[int, ...] = ()
+    visual_interval: int = 1
+    visual_phase_index: int = -1
+    model_id: str = "perceptive_supermimic_visual_clock_v4"
 
     def __post_init__(self):
         for name in ("state_dim", "delta_dim", "action_dim", "observation_dim", "privileged_dim", "model_input_dim", "history_length"):
@@ -43,16 +46,24 @@ class AlgorithmSpec:
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
         shape = tuple(self.depth_shape)
-        if len(shape) != 3 or any(isinstance(x, bool) or not isinstance(x, int) for x in shape) or shape[0] != 1 or min(shape[1:]) < 8:
-            raise ValueError("Depth shape must be (1, height, width), with both spatial dimensions >= 8")
+        if len(shape) != 3 or any(isinstance(x, bool) or not isinstance(x, int) for x in shape) or shape[0] < 1 or min(shape[1:]) < 8:
+            raise ValueError("Depth shape must be (channels, height, width), with channels >= 1 and spatial dimensions >= 8")
         object.__setattr__(self, "depth_shape", shape)
+        height_shape = tuple(self.image_height_shape)
+        if height_shape and (len(height_shape) != 3 or height_shape[0] != 1 or any(type(x) is not int or x < 1 for x in height_shape)):
+            raise ValueError("Image height shape must be empty or (1, height, width)")
+        object.__setattr__(self, "image_height_shape", height_shape)
+        if type(self.visual_interval) is not int or self.visual_interval < 1:
+            raise ValueError("Visual interval must be a positive integer")
+        if type(self.visual_phase_index) is not int or (self.visual_interval > 1 and not 0 <= self.visual_phase_index < self.memory_dim):
+            raise ValueError("A held visual observation requires a valid phase index in task memory")
         indices = tuple(self.command_indices)
         if (len(indices) != self.command_dim or len(set(indices)) != len(indices)
                 or any(isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < self.observation_dim for index in indices)
                 or len(indices) >= self.observation_dim):
             raise ValueError("Command indices must uniquely locate every command component inside the observation")
         object.__setattr__(self, "command_indices", indices)
-        if not self.semantic_id or not self.depth_semantic_id or self.model_id != "perceptive_supermimic_mlp_velocity_v3":
+        if not self.semantic_id or not self.depth_semantic_id or self.model_id != "perceptive_supermimic_visual_clock_v4":
             raise ValueError("Missing task/depth semantics or unsupported algorithm format")
 
     @property
@@ -81,19 +92,23 @@ class TaskState:
 
 @dataclass
 class VisualObservation:
-    """深度为已处理的[0,1]值；帧号在同一环境同一回合内严格递增。"""
+    """frame_id是控制步；相机版本仅采集时增加，高度标签随图像保持。"""
 
     proprio: Tensor
     depth: Tensor
     depth_clean: Tensor
     episode_id: Tensor
     frame_id: Tensor
+    camera_frame_id: Tensor | None = None
+    image_height: Tensor | None = None
 
     def index(self, index) -> VisualObservation:
-        return VisualObservation(**{field.name: getattr(self, field.name)[index] for field in fields(self)})
+        return VisualObservation(**{field.name: None if getattr(self, field.name) is None else getattr(self, field.name)[index]
+                                    for field in fields(self)})
 
     def detached_clone(self) -> VisualObservation:
-        return VisualObservation(**{field.name: getattr(self, field.name).detach().clone() for field in fields(self)})
+        return VisualObservation(**{field.name: None if getattr(self, field.name) is None else getattr(self, field.name).detach().clone()
+                                    for field in fields(self)})
 
 
 @dataclass
@@ -152,6 +167,8 @@ class VisualWindow:
     depth: Tensor
     depth_next: Tensor
     depth_next_clean: Tensor
+    image_keys: Tensor | None = None
+    depth_next_height: Tensor | None = None
 
     @property
     def initial(self) -> TaskState:
@@ -160,7 +177,9 @@ class VisualWindow:
     def index(self, index) -> VisualWindow:
         return VisualWindow(self.states.index(index), self.actions[index], self.targets.index(index),
                             self.contacts[index], self.valid[index], self.depth[index],
-                            self.depth_next[index], self.depth_next_clean[index])
+                            self.depth_next[index], self.depth_next_clean[index],
+                            None if self.image_keys is None else self.image_keys[index],
+                            None if self.depth_next_height is None else self.depth_next_height[index])
 
 
 class Task(Protocol):
@@ -205,6 +224,14 @@ def validate_decision(value: Decision, spec: AlgorithmSpec, batch: int, device: 
                for name, width in (("physical", spec.state_dim), ("memory", spec.memory_dim),
                                    ("command", spec.command_dim), ("context", spec.context_dim))]
     obs = value.observation
+    if spec.visual_interval > 1 and obs.camera_frame_id is None:
+        raise ValueError("Held images require camera frame IDs")
+    if spec.image_height_shape and obs.image_height is None:
+        raise ValueError("Image acquisition height labels are required by the task specification")
+    if obs.camera_frame_id is not None:
+        entries.append(("camera_frame_id", obs.camera_frame_id, (batch,), torch.int64))
+    if obs.image_height is not None:
+        entries.append(("image_height", obs.image_height, (batch, *spec.image_height_shape), torch.float32))
     entries.extend((("proprio", obs.proprio, (batch, spec.observation_dim), torch.float32),
                     ("depth", obs.depth, (batch, *spec.depth_shape), torch.float32),
                     ("depth_clean", obs.depth_clean, (batch, *spec.depth_shape), torch.float32),
@@ -218,3 +245,10 @@ def validate_decision(value: Decision, spec: AlgorithmSpec, batch: int, device: 
             raise FloatingPointError(f"Environment returned non-finite {name}")
     if ((obs.depth < 0) | (obs.depth > 1) | (obs.depth_clean < 0) | (obs.depth_clean > 1)).any():
         raise ValueError("Processed depth and clean targets must be within [0,1]")
+
+    if obs.image_height is not None and ((obs.image_height < -1) | (obs.image_height > 1)).any():
+        raise ValueError("Image height labels must be within [-1,1]")
+    if spec.visual_interval > 1:
+        phase = value.state.memory[:, spec.visual_phase_index]
+        if ((phase < 0) | (phase >= spec.visual_interval) | (phase != phase.round())).any():
+            raise ValueError("Visual phase must be an integer within the acquisition interval")

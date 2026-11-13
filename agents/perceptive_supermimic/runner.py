@@ -17,6 +17,7 @@ from .learner import Learner
 from .policy import Critic, PerceptiveActor
 from .terrain_perception import TerrainPerception
 from .vision import DepthDecoder, DepthEncoder
+from .mgdp_vision import MGDPDecoder, MGDPEncoder, MGDPTerrainPerception
 from .world_model import WorldModel
 
 
@@ -52,8 +53,14 @@ class PerceptiveRunner:
         self.config = config or PerceptiveConfig()
         self.execution = execution or ExecutionConfig()
         config = self.config
-        self.encoder = DepthEncoder(self.spec.depth_shape, config.latent_dim).to(self.device)
-        self.decoder = DepthDecoder(self.spec.depth_shape, config.latent_dim).to(self.device)
+        if config.perception_model == "mgdp":
+            if self.spec.depth_shape != (2, 16, 16):
+                raise ValueError("MGDP requires two 16x16 depth frames")
+            self.encoder = MGDPEncoder(2, (32, 64, 96), 64, 4).to(self.device)
+            self.decoder = MGDPDecoder(64, (96, 64, 32), 4, self.spec.depth_shape).to(self.device)
+        else:
+            self.encoder = DepthEncoder(self.spec.depth_shape, config.latent_dim).to(self.device)
+            self.decoder = DepthDecoder(self.spec.depth_shape, config.latent_dim).to(self.device)
         self.actor = PerceptiveActor(self.spec, config, self.encoder).to(self.device)
         self.model = WorldModel(self.task, config).to(self.device)
         self.critic = Critic(self.spec.privileged_dim, config.critic_hidden).to(self.device)
@@ -61,7 +68,8 @@ class PerceptiveRunner:
         if config.height_reconstruction_weight or config.contrastive_weight:
             if not callable(getattr(self.task, "terrain_height", None)):
                 raise ValueError("Terrain perception requires Task.terrain_height(state)")
-            self.terrain_perception = TerrainPerception(config.height_shape, config.latent_dim).to(self.device)
+            self.terrain_perception = (MGDPTerrainPerception() if config.perception_model == "mgdp"
+                                       else TerrainPerception(config.height_shape, config.latent_dim)).to(self.device)
         self.learner = Learner(self.task, self.actor, self.model, self.critic, self.decoder, config, self.execution,
                                terrain_perception=self.terrain_perception)
         self.replay = Replay(self.spec, env.num_envs, config.replay_capacity, config.image_capacity, self.device)
@@ -159,7 +167,7 @@ class PerceptiveRunner:
                 self.save(self.log_dir / f"model_{self.iteration}.pt")
         return latest
 
-    def save(self, path):
+    def save(self, path, *, metadata=None):
         """保存训练状态；仿真与回放不持久化，恢复后必须重新采集。"""
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -175,18 +183,21 @@ class PerceptiveRunner:
                                 **{f"{name}_updates": getattr(self.learner, f"{name}_updates") for name in ("model", "actor", "critic")}},
                    "torch_rng": torch.get_rng_state(),
                    "cuda_rng": torch.cuda.get_rng_state(self.device) if self.device.type == "cuda" else None}
+        if metadata is not None:
+            payload["metadata"] = metadata
         if self.terrain_perception is not None:
             payload["terrain_perception"] = self.terrain_perception.state_dict()
+        if self.learner.perception_optimizer is not None:
+            payload["optimizers"]["perception"] = self.learner.perception_optimizer.state_dict()
         with TemporaryDirectory(prefix=".perceptive_checkpoint_", dir=destination.parent) as temporary:
             pending = Path(temporary) / "model.pt"
             torch.save(payload, pending)
             pending.replace(destination)
         return destination
 
-    def load(self, path):
-        """仅恢复相同任务与算法配置，设备和微批预算允许由当前运行选择。"""
-        payload = torch.load(Path(path), map_location=self.device, weights_only=False)
-        if payload["format"] != self.spec.model_id or payload["spec_hash"] != self.spec.hash or payload["spec"] != asdict(self.spec):
+    def _validate_payload(self, payload, spec):
+        """写入前统一核对完整语义、网络布局及必需优化器。"""
+        if payload["format"] != spec.model_id or payload["spec_hash"] != spec.hash or payload["spec"] != asdict(spec):
             raise ValueError("Checkpoint task, depth or algorithm semantics do not match")
         if payload["config"] != asdict(self.config):
             raise ValueError("Checkpoint algorithm configuration does not match")
@@ -195,19 +206,65 @@ class PerceptiveRunner:
             raise ValueError("Checkpoint terrain perception module does not match")
         if self.terrain_perception is not None:
             modules["terrain_perception"] = self.terrain_perception
-        # 在写入任何网络前核对完整权重布局，避免把形状兼容误当成任务兼容。
         for name, module in modules.items():
-            current = module.state_dict()
-            saved = payload[name]
+            current, saved = module.state_dict(), payload[name]
             if saved.keys() != current.keys() or any(saved[key].shape != value.shape for key, value in current.items()):
                 raise ValueError(f"Checkpoint {name} tensor layout does not match")
             if any(not bool(torch.isfinite(value).all()) for value in saved.values()):
                 raise ValueError(f"Checkpoint {name} contains non-finite tensors")
+        optimizer_names = {"model", "actor", "critic"}
+        if self.learner.perception_optimizer is not None:
+            optimizer_names.add("perception")
+        if set(payload["optimizers"]) != optimizer_names:
+            raise ValueError("Checkpoint optimizer ownership does not match")
+        for name in optimizer_names:
+            current = getattr(self.learner, f"{name}_optimizer").state_dict()["param_groups"]
+            saved = payload["optimizers"][name]["param_groups"]
+            if len(current) != len(saved) or any(len(a["params"]) != len(b["params"]) for a, b in zip(current, saved)):
+                raise ValueError(f"Checkpoint {name} optimizer layout does not match")
+            saved_state = payload["optimizers"][name].get("state")
+            if not isinstance(saved_state, dict):
+                raise ValueError(f"Checkpoint {name} optimizer state is missing")
+            optimizer = getattr(self.learner, f"{name}_optimizer")
+            parameter_map = {key: parameter for group, live in zip(saved, optimizer.param_groups)
+                             for key, parameter in zip(group["params"], live["params"])}
+            if not set(saved_state).issubset(parameter_map):
+                raise ValueError(f"Checkpoint {name} optimizer has unknown parameter states")
+            for key, values in saved_state.items():
+                if not {"step", "exp_avg", "exp_avg_sq"}.issubset(values):
+                    raise ValueError(f"Checkpoint {name} Adam state is incomplete")
+                for field, tensor in values.items():
+                    expected_shape = () if field == "step" else parameter_map[key].shape
+                    if not isinstance(tensor, torch.Tensor) or tensor.shape != expected_shape or not torch.isfinite(tensor).all():
+                        raise ValueError(f"Checkpoint {name} Adam tensor is invalid: {field}")
+            for group, expected in zip(saved, current):
+                if not set(expected).issubset(group):
+                    raise ValueError(f"Checkpoint {name} optimizer group is incomplete")
+        counters = payload["counters"]
+        for name in ("iteration", "real_steps", "imagined_steps", "model_updates", "actor_updates", "critic_updates"):
+            _integer(counters[name], f"Checkpoint {name}", minimum=0)
+        if not math.isfinite(counters["training_seconds"]) or counters["training_seconds"] < 0:
+            raise ValueError("Checkpoint training duration is invalid")
+        if not 0 <= counters["collect_accumulator"] < 1:
+            raise ValueError("Checkpoint collection accumulator is invalid")
+        rng = payload["torch_rng"]
+        if not isinstance(rng, torch.Tensor) or rng.dtype != torch.uint8 or rng.shape != torch.get_rng_state().shape:
+            raise ValueError("Checkpoint CPU RNG state is invalid")
+        rng = payload["cuda_rng"]
+        if rng is not None and (not isinstance(rng, torch.Tensor) or rng.dtype != torch.uint8 or rng.ndim != 1):
+            raise ValueError("Checkpoint CUDA RNG state is invalid")
+        if self.device.type == "cuda" and rng is not None and rng.shape != torch.cuda.get_rng_state(self.device).shape:
+            raise ValueError("Checkpoint CUDA RNG state size does not match")
+        return modules
+
+    def _restore(self, payload, modules):
         for name, module in modules.items():
             module.load_state_dict(payload[name])
         for name in ("model", "actor", "critic"):
             getattr(self.learner, f"{name}_optimizer").load_state_dict(payload["optimizers"][name])
             setattr(self.learner, f"{name}_updates", payload["counters"][f"{name}_updates"])
+        if self.learner.perception_optimizer is not None:
+            self.learner.perception_optimizer.load_state_dict(payload["optimizers"]["perception"])
         for name in ("iteration", "real_steps", "imagined_steps", "training_seconds"):
             setattr(self, name, payload["counters"][name])
         self._collect_accumulator = payload["counters"]["collect_accumulator"]
@@ -217,3 +274,44 @@ class PerceptiveRunner:
         self.current = self.history = None
         self._needs_prefill = True
         self.replay.clear()
+
+    def load(self, path):
+        """仅恢复相同任务与算法配置，设备和微批预算允许由当前运行选择。"""
+        payload = torch.load(Path(path), map_location=self.device, weights_only=False)
+        self._restore(payload, self._validate_payload(payload, self.spec))
+
+    def load_components(self, policy_path, perception_path, *, source_spec):
+        """显式跨任务衔接；调用方负责确认源/目标任务许可，布局与深度语义必须一致。
+
+        策略、critic和对应优化器来自policy；感知、动力学、统计与优化器
+        来自perception。先校验两份完整源检查点，再修改当前对象。
+        """
+        source_layout, target_layout = asdict(source_spec), asdict(self.spec)
+        source_layout.pop("semantic_id")
+        target_layout.pop("semantic_id")
+        if source_layout != target_layout or self.learner.perception_optimizer is None:
+            raise ValueError("Component transfer requires matching layouts and independent perception optimization")
+        policy = torch.load(Path(policy_path), map_location=self.device, weights_only=False)
+        perception = torch.load(Path(perception_path), map_location=self.device, weights_only=False)
+        modules = self._validate_payload(policy, source_spec)
+        self._validate_payload(perception, source_spec)
+        # actor含共享encoder，显式替换该子树，避免最新策略覆盖最佳感知。
+        merged = dict(policy)
+        merged["actor"] = {key: perception["actor"][key] if key.startswith("encoder.") else value
+                           for key, value in policy["actor"].items()}
+        for name in ("model", "decoder", "terrain_perception"):
+            if name in modules:
+                merged[name] = perception[name]
+        merged["optimizers"] = dict(policy["optimizers"])
+        for name in ("model", "perception"):
+            merged["optimizers"][name] = perception["optimizers"][name]
+        merged["counters"] = dict(policy["counters"])
+        merged["counters"]["model_updates"] = perception["counters"]["model_updates"]
+        self._restore(merged, modules)
+        return {"policy_checkpoint": str(Path(policy_path).resolve()),
+                "policy_iteration": policy["counters"]["iteration"],
+                "perception_checkpoint": str(Path(perception_path).resolve()),
+                "perception_iteration": perception["counters"]["iteration"],
+                "dynamics_iteration": perception["counters"]["iteration"],
+                "source_semantic_id": source_spec.semantic_id,
+                "target_semantic_id": self.spec.semantic_id}

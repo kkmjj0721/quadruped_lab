@@ -35,6 +35,7 @@ class PerceptiveConfig:
     imag_batch: int = 1024
     horizon: int = 32
     latent_dim: int = 32
+    perception_model: str = "latent"
     proprio_latent_dim: int = 32
     history_hidden: tuple[int, ...] = (256, 128)
     visual_hidden: tuple[int, ...] = (64, 64)
@@ -67,6 +68,10 @@ class PerceptiveConfig:
     save_interval: int = 1000
 
     def __post_init__(self):
+        if self.perception_model not in ("latent", "mgdp"):
+            raise ValueError("Perception model must be latent or mgdp")
+        if self.perception_model == "mgdp" and (self.latent_dim != 64 or tuple(self.height_shape) != (17, 11)):
+            raise ValueError("MGDP requires visual latent dimension 64 and a 17x11 height map")
         positive = ("replay_capacity", "image_capacity", "warmup_steps", "wm_window", "wm_batch", "wm_updates",
                     "imag_batch", "horizon", "latent_dim", "proprio_latent_dim", "visual_policy_dim", "reconstruction_images",
                     "lr_decay_iterations", "critic_epochs", "critic_minibatches", "log_interval", "save_interval")

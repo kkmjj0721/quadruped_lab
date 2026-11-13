@@ -40,11 +40,14 @@ class Replay:
         image_shape = (image_capacity, num_envs, *spec.depth_shape)
         self.images = torch.zeros(image_shape, dtype=torch.float16, device=self.device)
         self.clean_images = torch.zeros_like(self.images)
+        self.height_images = (torch.zeros(image_capacity, num_envs, *spec.image_height_shape, device=self.device)
+                              if spec.image_height_shape else None)
         self.image_versions = torch.full((image_capacity, num_envs), -1, dtype=torch.int64, device=self.device)
         self._image_clock = torch.zeros(num_envs, dtype=torch.int64, device=self.device)
         self._next_refs = torch.full_like(self._image_clock, -1)
         self._next_episodes = torch.zeros_like(self._image_clock)
         self._next_frames = torch.zeros_like(self._image_clock)
+        self._next_camera_frames = torch.zeros_like(self._image_clock)
         self._has_next = False
 
     def _state_storage(self) -> TaskState:
@@ -93,12 +96,24 @@ class Replay:
         if self._has_next and ((obs.episode_id != self._next_episodes) | (obs.frame_id != self._next_frames)).any():
             raise ValueError("Current frame must match the previous next decision; clear replay before restarting collection")
         if (final.episode_id != obs.episode_id).any() or (final.frame_id <= obs.frame_id).any():
-            raise ValueError("A synchronous transition must advance to a new frame inside the same episode")
+            raise ValueError("A transition must advance its control frame inside the same episode")
+        if obs.camera_frame_id is not None:
+            if self._has_next and (obs.camera_frame_id != self._next_camera_frames).any():
+                raise ValueError("Current camera frame must match the previous next decision")
+            difference = final.camera_frame_id - obs.camera_frame_id
+            if ((difference < 0) | (difference > 1)).any():
+                raise ValueError("Camera frame must be held or advance by one acquisition")
+            held = difference == 0
+            for name in ("depth", "depth_clean", "image_height"):
+                left, right = getattr(obs, name), getattr(final, name)
+                if left is not None and not torch.equal(left[held], right[held]):
+                    raise ValueError(f"Held image acquisition data changed: {name}")
         done = result.terminated | result.truncated
         if (next_obs.episode_id[done] == final.episode_id[done]).any():
             raise ValueError("A reset decision must have a different episode ID")
         keep = ~done
-        equal_values = [(getattr(final, field.name), getattr(next_obs, field.name)) for field in fields(VisualObservation)]
+        equal_values = [(getattr(final, field.name), getattr(next_obs, field.name)) for field in fields(VisualObservation)
+                        if getattr(final, field.name) is not None]
         equal_values.extend((getattr(result.final.state, field.name), getattr(result.next.state, field.name)) for field in fields(TaskState))
         equal_values.append((result.final.context_version, result.next.context_version))
         if any(not torch.equal(left[keep], right[keep]) for left, right in equal_values):
@@ -110,6 +125,8 @@ class Replay:
         rows = refs % self.image_capacity
         self.images[rows, env] = observation.depth[mask].half()
         self.clean_images[rows, env] = observation.depth_clean[mask].half()
+        if self.height_images is not None:
+            self.height_images[rows, env] = observation.image_height[mask]
         self.image_versions[rows, env] = refs
         self._image_clock[mask] += 1
         return refs
@@ -120,7 +137,12 @@ class Replay:
         self._validate_transition(current, history, action, result)
         all_envs = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         current_refs = self._next_refs.clone() if self._has_next else self._store_images(current.observation, all_envs)
-        final_refs = self._store_images(result.final.observation, all_envs)
+        if current.observation.camera_frame_id is None:
+            final_refs = self._store_images(result.final.observation, all_envs)
+        else:
+            acquired = result.final.observation.camera_frame_id != current.observation.camera_frame_id
+            final_refs = current_refs.clone()
+            final_refs[acquired] = self._store_images(result.final.observation, acquired)
         done = result.terminated | result.truncated
         next_refs = final_refs.clone()
         next_refs[done] = self._store_images(result.next.observation, done)
@@ -139,6 +161,8 @@ class Replay:
         self._next_refs.copy_(next_refs)
         self._next_episodes.copy_(result.next.observation.episode_id)
         self._next_frames.copy_(result.next.observation.frame_id)
+        if result.next.observation.camera_frame_id is not None:
+            self._next_camera_frames.copy_(result.next.observation.camera_frame_id)
         self._has_next = True
         self.clock += 1
         self.size = min(self.size + 1, self.capacity)
@@ -183,10 +207,11 @@ class Replay:
             raise ValueError("Replay has no valid starts with live image references for the requested window")
         return candidates[torch.randint(candidates.shape[0], (batch,), device=self.device)]
 
-    def _read_images(self, refs, env, valid, *, clean: bool = False):
-        output = torch.zeros((*refs.shape, *self.spec.depth_shape), dtype=torch.float32, device=self.device)
+    def _read_images(self, refs, env, valid, *, clean: bool = False, height: bool = False):
+        shape = self.spec.image_height_shape if height else self.spec.depth_shape
+        output = torch.zeros((*refs.shape, *shape), dtype=torch.float32, device=self.device)
         env = torch.broadcast_to(env, refs.shape)
-        source = self.clean_images if clean else self.images
+        source = self.height_images if height else self.clean_images if clean else self.images
         output[valid] = source[refs[valid] % self.image_capacity, env[valid]].float()
         return output
 
@@ -225,4 +250,6 @@ class Replay:
         actions = self.actions[rows, env] * available.unsqueeze(-1)
         contacts = self.contacts[rows, env] * available.unsqueeze(-1)
         return VisualWindow(states, actions, targets, contacts, valid, depth,
-                            self._read_images(final, env, valid), self._read_images(final, env, valid, clean=True))
+                            self._read_images(final, env, valid), self._read_images(final, env, valid, clean=True),
+                            final * self.num_envs + env,
+                            self._read_images(final, env, valid, height=True) if self.height_images is not None else None)
