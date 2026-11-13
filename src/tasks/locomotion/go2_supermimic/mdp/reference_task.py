@@ -112,11 +112,14 @@ class Go2ReferenceTaskModel:
         return self.surface.height_unchecked(xy)
 
     def bind_env(self, env):
-        """在仿真边界固定本项目FL、FR、RL、RR顺序的关节中心与足端site。"""
+        """在任务设备缓存FL、FR、RL、RR顺序的关节中心与足端site索引。"""
         robot = env.scene["robot"]
-        self.hip_ids, _ = robot.find_bodies(tuple(f"{leg}_thigh" for leg in FOOT_NAMES), preserve_order=True)
-        self.knee_ids, _ = robot.find_bodies(tuple(f"{leg}_calf" for leg in FOOT_NAMES), preserve_order=True)
-        self.foot_ids, _ = robot.find_sites(FOOT_NAMES, preserve_order=True)
+        hip_ids, _ = robot.find_bodies(tuple(f"{leg}_thigh" for leg in FOOT_NAMES), preserve_order=True)
+        knee_ids, _ = robot.find_bodies(tuple(f"{leg}_calf" for leg in FOOT_NAMES), preserve_order=True)
+        foot_ids, _ = robot.find_sites(FOOT_NAMES, preserve_order=True)
+        self.hip_ids = torch.as_tensor(hip_ids, dtype=torch.long, device=self.device)
+        self.knee_ids = torch.as_tensor(knee_ids, dtype=torch.long, device=self.device)
+        self.foot_ids = torch.as_tensor(foot_ids, dtype=torch.long, device=self.device)
 
     def read_physical(self, env) -> Tensor:
         """读取最后forward后的瞬时量；腿部历史力取最大模以保留来源any语义。"""
