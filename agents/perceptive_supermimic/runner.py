@@ -10,6 +10,9 @@ import time
 
 import torch
 
+from agents.supermimic.metrics import EpisodeWindow, read_metrics
+from agents.supermimic.timing import PhaseTimer
+
 from .buffer import Replay
 from .config import ExecutionConfig, PerceptiveConfig
 from .interfaces import append_history, validate_decision
@@ -29,11 +32,8 @@ def _integer(value, name, minimum=1):
         raise ValueError(f"{name} must be an integer >= {minimum}")
 
 
-def _numbers(metrics):
-    keys = [name for name, value in metrics.items() if isinstance(value, torch.Tensor)]
-    values = torch.stack([metrics[name].detach().float().reshape(()) for name in keys]).cpu().tolist() if keys else []
-    result = {name: float(value) for name, value in metrics.items() if name not in keys}
-    result.update(zip(keys, values))
+def _numbers(metrics, device, *, validity=None):
+    result = read_metrics(metrics, device, validity=validity)
     if not all(math.isfinite(value) for value in result.values()):
         raise FloatingPointError("Training metrics are non-finite")
     return result
@@ -78,6 +78,14 @@ class PerceptiveRunner:
         self.training_seconds = self._collect_accumulator = 0.0
         self.current = self.history = None
         self._needs_prefill = True
+        self.episode_returns = torch.zeros(env.num_envs, device=self.device)
+        self.episode_lengths = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
+        self.completed_episodes = EpisodeWindow(env.num_envs, self.device)
+        self._collection_metric_validity = {}
+
+    def _collection_step_metrics(self):
+        """任务子类提供当前真实控制步的指标，算法不解释任务奖励。"""
+        return {}
 
     @torch.no_grad()
     def reset_collection(self):
@@ -87,6 +95,10 @@ class PerceptiveRunner:
         self.history = decision.observation.proprio[:, None].repeat(1, self.spec.history_length, 1)
         self.replay.clear()
         self._needs_prefill = True
+        self.episode_returns.zero_()
+        self.episode_lengths.zero_()
+        self.completed_episodes.clear()
+        self._collection_metric_validity = {}
 
     @torch.no_grad()
     def collect(self, steps):
@@ -96,6 +108,8 @@ class PerceptiveRunner:
         reward = torch.zeros((), device=self.device)
         failures = torch.zeros_like(reward)
         timeouts = torch.zeros_like(reward)
+        action_rms = torch.zeros_like(reward)
+        totals, counts = {}, {}
         for _ in range(steps):
             action = self.actor(self.history, self.current.observation.depth)
             action = (action + self.config.action_noise * torch.randn_like(action)).clamp(-self.config.action_clip, self.config.action_clip)
@@ -104,6 +118,11 @@ class PerceptiveRunner:
             self.replay.add(self.current, self.history, action, result)
             self.actor.update_statistics(self.history)
             done = result.terminated | result.truncated
+            self.episode_returns.add_(result.reward)
+            self.episode_lengths.add_(1)
+            self.completed_episodes.append(self.episode_returns, self.episode_lengths, done)
+            self.episode_returns.masked_fill_(done, 0)
+            self.episode_lengths.masked_fill_(done, 0)
             frame = result.next.observation.proprio
             history = append_history(self.history, frame)
             self.history = torch.where(done[:, None, None], frame[:, None].expand_as(history), history)
@@ -111,8 +130,19 @@ class PerceptiveRunner:
             reward += result.reward.mean()
             failures += result.terminated.sum()
             timeouts += (result.truncated & ~result.terminated).sum()
+            action_rms += action.square().mean().sqrt()
+            for name, value in self._collection_step_metrics().items():
+                totals[name] = totals.get(name, 0) + value
+                counts[name] = counts.get(name, 0) + 1
             self.real_steps += self.env.num_envs
-        return {"real_reward": reward / steps, "failures": failures, "timeouts": timeouts}
+        metrics = {name: value / counts[name] for name, value in totals.items()}
+        metrics.update(real_reward=reward / steps, failures=failures, timeouts=timeouts,
+                       **{"task/action_rms": action_rms / steps,
+                          "episode/completed": failures + timeouts,
+                          "collection/control_steps": steps, "real_steps_delta": steps * self.env.num_envs})
+        episodes, self._collection_metric_validity = self.completed_episodes.metrics(self.task.dt)
+        metrics.update(episodes)
+        return metrics
 
     def _prepare(self):
         if self.current is None:
@@ -137,10 +167,12 @@ class PerceptiveRunner:
         for _ in range(iterations):
             self._synchronize()
             started = time.perf_counter()
+            timer = PhaseTimer(self.device)
             self._collect_accumulator += self.config.collect_steps
             steps = math.floor(self._collect_accumulator)
             self._collect_accumulator -= steps
             metrics = self.collect(steps)
+            timer.mark("collection")
             self.learner.schedule(self.iteration)
             model_metrics = {}
             for _ in range(self.config.wm_updates):
@@ -148,20 +180,32 @@ class PerceptiveRunner:
                 for name, value in self.learner.fit_model(window).items():
                     model_metrics[name] = model_metrics.get(name, 0) + value / self.config.wm_updates
             metrics.update(model_metrics)
+            timer.mark("world_model")
             if self.iteration >= self.config.wm_only_iterations:
                 seed = self.replay.sample_seeds(self.config.imag_batch)
                 metrics.update(self.learner.improve(seed))
                 self.imagined_steps += self.config.imag_batch * self.config.horizon
+            timer.mark("control")
             self.iteration += 1
             self._synchronize()
-            self.training_seconds += time.perf_counter() - started
+            iteration_seconds = time.perf_counter() - started
+            self.training_seconds += iteration_seconds
             metrics.update(iteration=self.iteration, real_steps=self.real_steps, imagined_steps=self.imagined_steps,
                            model_updates=self.learner.model_updates, actor_updates=self.learner.actor_updates,
-                           critic_updates=self.learner.critic_updates, training_seconds=self.training_seconds)
-            latest = _numbers(metrics)
+                           critic_updates=self.learner.critic_updates, training_seconds=self.training_seconds,
+                           world_model_learning_rate=self.learner.model_optimizer.param_groups[0]["lr"],
+                           control_learning_rate=self.learner.actor_optimizer.param_groups[0]["lr"],
+                           critic_learning_rate=self.learner.critic_optimizer.param_groups[0]["lr"],
+                           control_enabled=float(self.iteration - 1 >= self.config.wm_only_iterations))
+            metrics.update({"timing/collection_seconds": timer.seconds("start", "collection"),
+                            "timing/world_model_seconds": timer.seconds("collection", "world_model"),
+                            "timing/control_seconds": timer.seconds("world_model", "control"),
+                            "timing/iteration_seconds": iteration_seconds,
+                            "performance/real_total_fps": steps * self.env.num_envs / max(iteration_seconds, 1e-9)})
+            latest = _numbers(metrics, self.device, validity=self._collection_metric_validity)
             if callback is not None:
                 callback(latest)
-            if self.iteration % self.config.log_interval == 0:
+            if callback is None and self.iteration % self.config.log_interval == 0:
                 logger.info("Iteration %d: model_loss=%.6f, real_steps=%d", self.iteration, latest["model_loss"], self.real_steps)
             if self.log_dir is not None and self.iteration % self.config.save_interval == 0:
                 self.save(self.log_dir / f"model_{self.iteration}.pt")

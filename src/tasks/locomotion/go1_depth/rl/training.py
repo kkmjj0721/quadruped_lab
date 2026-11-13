@@ -13,12 +13,13 @@ import time
 
 import torch
 
-from agents.perceptive_supermimic import PerceptiveRunner
 from agents.perceptive_supermimic.export import export_policy
 from src.config.go1_depth.go1_depth_config import IMAGINATION_HORIZON
 
 from .adapter import Go1DepthEnv
 from .evaluation import compare_trajectories, evaluate_closed_loop, plot_trajectory_comparison, replay_heldout_trajectories
+from .logging import TrainingProgress
+from .runner import Go1DepthRunner
 
 
 def _write_json(path, data):
@@ -42,6 +43,7 @@ def save_sources(output: Path) -> None:
                                         "tests/test_training/go1_mgdp_backend_probe.py",
                                         "agents/supermimic/policy.py", "agents/supermimic/world_model.py",
                                         "agents/supermimic/learner.py", "agents/base/modules/mlp.py",
+                                        "agents/supermimic/logging.py", "agents/supermimic/metrics.py", "agents/supermimic/timing.py",
                                         "src/tasks/locomotion/go2_supermimic/mdp/terrains.py",
                                         "src/tasks/locomotion/go2_supermimic/mdp/reference_rotations.py",
                                         "src/assets/robots/go1_depth/xmls/go1.xml")]
@@ -131,7 +133,7 @@ def train(env_config, algorithm, execution, *, device, output, iterations: int,
     else:
         env = Go1DepthEnv(env_config, device=device, latent_dim=algorithm.latent_dim)
     try:
-        runner = PerceptiveRunner(env, algorithm, execution=execution, log_dir=output)
+        runner = Go1DepthRunner(env, algorithm, execution=execution, log_dir=output)
         transfer = None
         if checkpoint is not None:
             runner.load(checkpoint)
@@ -182,6 +184,9 @@ def train(env_config, algorithm, execution, *, device, output, iterations: int,
         before_evaluation = compare_trajectories(env, runner.actor, runner.model, output / "evaluation_before", batches=2) if verify else None
         # 评估样本不写入训练回放，之后重新reset并填充真实训练数据。
         runner.reset_collection()
+        progress = TrainingProgress(algorithm, num_envs=env.num_envs, device=env.device,
+                                    initial_iteration=initial_iterations, initial_seconds=initial_seconds,
+                                    target_iteration=initial_iterations + iterations, minimum_training_seconds=minimum_training_seconds)
         start_wall = time.perf_counter()
         from torch.utils.tensorboard import SummaryWriter
         with SummaryWriter(log_dir=str(output / "tensorboard")) as writer, (output / "metrics.jsonl").open("w", encoding="utf-8") as stream:
@@ -197,6 +202,7 @@ def train(env_config, algorithm, execution, *, device, output, iterations: int,
                 stream.flush()
                 for name, value in values.items():
                     writer.add_scalar(name, value, runner.iteration)
+                progress.record(values)
                 # 官方it从0开始；阶段切换重新计时，普通resume沿用该阶段的保存相位。
                 if (runner.iteration - stage_offset - 1) % algorithm.save_interval == 0:
                     select_perception(metrics)
@@ -209,6 +215,7 @@ def train(env_config, algorithm, execution, *, device, output, iterations: int,
                 if time.perf_counter() - start_wall > timeout_seconds:
                     raise TimeoutError("Go1 training exceeded the configured wall-clock budget")
                 latest = runner.learn(1, callback=record)
+            progress.flush()
         actual_seconds = runner.training_seconds - initial_seconds
         checkpoint_path = runner.save(output / "model_final.pt")
         changes = {}
