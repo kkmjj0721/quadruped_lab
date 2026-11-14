@@ -25,7 +25,10 @@ agents/
 │   ├── runner.py         # 训练循环、保存与续训
 │   ├── export.py         # TorchScript／ONNX 导出
 │   ├── logging.py        # TensorBoard 与终端日志
+│   ├── visual/           # 视觉策略、显式感知记忆、辅助学习与想象接口
 │   └── NOTICE.md
+├── perception/      # MGDP 重建／对齐与 GRU 米制地图
+├── foothold/        # 四足注意力选点与监督损失
 └── __init__.py
 ```
 
@@ -104,3 +107,32 @@ uv run --no-sync python -B -m unittest discover -s tests/test_agents -v
 ## SuperMimic 混合专家历史策略
 
 默认 Go2 任务使用 `agents.supermimic`：go2_rl_gym 的八专家历史编码器加 ELU 动作网络、SiLU 世界模型和短时域 BPTT。无教师或蒸馏，部署只输入五帧本体历史；编码器输出32维潜特征和3维当前机身线速度估计，仅潜特征做L2归一化，速度由真实回放同一时刻真值监督。配置与训练、播放、验证入口统一见 [Go2任务说明](../docs/go2_supermimic.md)，来源与迁移差异见 [supermimic/NOTICE.md](supermimic/NOTICE.md)。
+
+## 视觉感知与落足算法
+
+| 入口 | 输入与职责 |
+| --- | --- |
+| `agents.perception.MGDPPerception` | 双帧 `[B,2,16,16]`、本体历史与显式 GRU 状态；预测米制 `[B,17,11]` 地图，另提供训练重建损失 |
+| `agents.foothold.FootholdPlanner` | 本体历史、指令、重建地图与构造时提供的候选 xy；输出四足候选分布和 top-1 三维点 |
+| `agents.supermimic.visual.VisualActor` | 本体历史、地图、任务锁存的四足目标与有效位；MLP 估计 32 维 latent 与 3 维机身速度，输出关节动作 |
+| `agents.supermimic.visual.VisualLearner` | 感知序列监督、选点监督、已有世界模型拟合和视觉 BPTT；不执行环境采集或生成接触标签 |
+
+`AlgorithmSpec.model_id` 使用 `supermimic_visual_foothold_v2`，旧视觉 MoE 检查点不可载入。历史估计器隐藏层按用户指定采用 256、128、64，结构为 `5D→256→128→64→35`、ELU、线性输出；前 3 维为速度、后 32 维 latent 做 L2 归一化。`D=45` 时输入 225 维，动作 MLP 输入 283 维。视觉估计器不使用 `SuperMimicConfig.moe_*`，动作 MLP 宽度继续由 `actor_hidden` 指定；来源与训练差异见 [NOTICE.md](supermimic/NOTICE.md#视觉感知与落足接口)。
+
+视觉入口使用 `SuperMimicConfig(compile_imagination=False)`；未传执行配置时，actor、世界模型、critic、感知及选点五路网络默认全部开启 CUDA BF16，需要原生支持 BF16 的 CUDA 设备。感知包括深度／高度编解码器、GRU 和地图头，选点包括卷积、MLP 与注意力矩阵乘法；网络对外输出、状态、记忆、几何坐标、概率归一化、损失及返回递推保持 FP32。显式 `VisualExecutionConfig`（从 `agents.supermimic.visual` 导入）的 `wm_bf16`、`actor_bf16`、`critic_bf16`、`perception_bf16`、`planner_bf16` 分别控制五路；通用默认均为 False，CPU 检查传入 `ExecutionConfig(cuda_graph=False, wm_compile=False, fused_adam=False)`。请求 BF16 时不自动回退。CUDA Graph／想象编译仍关闭；原 `SuperMimicRunner` 和 `make_actor` 不装配视觉链。
+
+任务实现 [VisualTask](supermimic/visual/interfaces.py) 的 `update_camera`、`update_visual_targets`、`visual_privileged`，并保留已有世界模型任务接口。相机函数负责预测位姿渲染、噪声、双帧和相位；目标函数负责锁存与坐标转换。算法在相机刷新时更新深度 token、每控制步推进 GRU，奖励及终止规则由任务维护。
+
+`PerceptionPrefix` 必须为同回合、从起点到当前决策步之前的完整前缀，允许尾部填充；首个有效步必须刷新相机。`rebuild_seed()` 按当前权重重算 token 和隐藏状态，返回当前步感知更新前的 `VisualSeed`。`fit_perception()` 或 `load()` 后须重新构造种子，旧种子会报错。回放采集与相机事件压缩由后续任务运行器接入。
+
+`PerceptionBatch.height_normalized` 是供 MGDP 自重建的有限完整标签；`height_metric` 和 `height_valid` 是独立米制地图监督。`FootholdBatch.candidate_valid` 标记 GT 候选的几何有效性，只进入损失。无效米制标签可以是 NaN，全部无效的监督批次跳过相应优化器更新。
+
+`VisualLearner.save/load` 保存和恢复五个网络、优化器、归一化统计和学习排期，同时记录执行配置来源；恢复采用当前执行精度，不保存环境、回放或随机数状态。`export()` 生成 FP32 TorchScript 部署组合，仅包含深度编码器、GRU、地图头、选点和动作策略，不改变训练对象精度；调用者通过 `encode_depth`、`perceive_step`、`propose` 和 `forward` 显式管理帧保持与目标锁存。
+
+算法级检查：
+
+```bash
+OMP_NUM_THREADS=1 .venv/bin/python -B -m unittest tests.test_agents.test_perception tests.test_agents.test_foothold tests.test_agents.test_visual_supermimic -v
+```
+
+来源与适配见 [感知说明](perception/NOTICE.md)、[选点说明](foothold/NOTICE.md)和[视觉 SuperMimic 说明](supermimic/NOTICE.md#视觉感知与落足接口)。这些模块尚未接入 Go1 实际采集与射线场景，算法级检查不代表机器人行走效果。

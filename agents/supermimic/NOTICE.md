@@ -6,6 +6,18 @@ Go2结构化动力学的数学实现以 [BlinkMimic@d264658 `networks.py:113-209
 
 这次迁移仅覆盖结构化动力学：Go2使用本地MJCF的髋／膝连杆原点和足端site，足速包含根部twist与关节速度；保留已有瞬时加速度、接触、力矩等独立辅助监督，保留现有网络隐藏层与RunningNorm统计机制。残差输出统计与物理误差增量统计分离，核心误差下限取BlinkMimic `train.py` 的 `ERR_FLOOR`，输出层采用其零初始化。四元数作为内部完整姿态存储，任务观测／奖励接口保持。参考为人形动作跟踪，本项目为Go2速度跟踪；结构对拍和运行检查不能证明控制效果改善。
 
+## 视觉感知与落足接口
+
+`visual/` 是本项目在现有算法上的独立实现，采用已选定的“感知与选点监督、动作策略 BPTT”组合。`VisualActor` 使用 MLP 历史估计器和当前真实速度监督，将米制地图及任务锁存目标接入动作 MLP；`VisualLearner` 复用 `Learner.fit_model/improve` 和 critic 更新；`VisualImagination` 沿用现有折扣奖励、尾部价值及 `Imagination.lambda_returns`。
+
+视觉估计器结构参考 [HIMLoco@ef289ac `him_estimator.py:10–67`](https://github.com/InternRobotics/HIMLoco/blob/ef289acaa62795009363b7b819c9186690630441/rsl_rl/rsl_rl/modules/him_estimator.py#L10-L67)：两层隐藏 MLP（128、64，ELU）、线性输出、速度在前、latent 在后且仅后者 L2 归一化。本项目按用户要求将隐藏层改为 256、128、64，并将官方 latent 16 改为 32，五帧 45 维示例为 `225→256→128→64→35`；这些宽度是用户指定值，不是官方默认值。该前向结构使用已有 `Mlp` 独立装配；归一化及统计操作通过 `HistoryActor` 与盲策略共享。论文《Hybrid Internal Model: Learning Agile Legged Locomotion with Simulated Robot Response》§3.2–3.3 的宽度叙述与代码不同，此处以固定版本代码为结构依据。训练保留本项目当前速度监督和 SuperMimic BPTT，不迁入 HIM 的 target/prototype、SwAV 或 PPO detach；不宣称完整复现 HIM 或已验证训练收益。视觉模型标识为 `supermimic_visual_foothold_v2`，旧视觉 MoE 权重明确拒绝。
+
+想象时预测位姿渲染和视觉输入停梯度的依据为 [InstinctMJ@03563ee `runner.py:render_depth,act_detached,_imagine`](https://github.com/project-instinct/InstinctMJ/blob/03563ee02665f327425106372264070315673748/src/instinct_mj/rl/supermimic/runner.py)。这里只借鉴接口与梯度边界，未移植其渲染代码；真实相机、噪声及独立射线状态由任务实现。原实现使用 G1 跟踪，本项目改为四足米制地图和锁存目标，不能据外部实现推断 Go1 训练效果。
+
+感知与选点的固定版本和方法差异分别见 [perception/NOTICE.md](../perception/NOTICE.md) 与 [foothold/NOTICE.md](../foothold/NOTICE.md)。算法持有显式视觉种子、缓存 token 和 GRU 状态；感知更新后重放同回合完整前缀，部署副本剔除 GT 分支。候选监督的几何掩码只用于标签，任务奖励和接触状态机仍归 `src/tasks/`。
+
+本接口通过独立 `VisualLearner` 和部署组合使用，未接入原 Go2 runner 的采集、归档或 CUDA Graph。视觉学习器默认五路网络全部采用局部 CUDA BF16，包括 MGDP 卷积／MLP／GRU、训练重建分支和选点注意力矩阵乘法；网络对外输出及记忆、几何、概率归一化、损失归约、物理状态和优化器状态保留 FP32。局部 autocast／输出转 FP32 的边界沿用下述 BlinkMimic 依据；扩展到视觉网络属于本项目工程适配，不代表上游已验证此组合。通用执行配置可显式关闭五路开关，部署副本固定 FP32。算法数值、梯度、有限步更新与持久化检查只证明相应算法接口行为，不代表实际渲染、机器人训练或稀疏地形能力。
+
 ## 8MoE主线与SuperMimic机制
 
 可选网络BF16精度采用 [BlinkMimic@d264658 `run_mlp`](https://github.com/fuyichen0725/blinkmimic/blob/d264658d6c9ce61fb52f9f0f8985a369f3ccc409/src/blinkmimic/networks.py#L64) 的局部autocast与输出转FP32边界，并参考 [XMimic@54860e1 `nets.py`](https://github.com/nico-bohlinger/xmimic/blob/54860e100251fa80143627565568d5e6b0ff2c2b/xmimic/nets.py#L43)、`fast_nets.py` 与 `tests/test_fast_equiv.py` 区分矩阵精度、状态精度及梯度差异。三个网络开关独立，Go2主线新训练默认开启BF16；归一化、状态积分、奖励、返回递推、MoE分组卷积与融合均沿用FP32。XMimic使用JAX及G1动作跟踪，本项目为PyTorch与Go2速度跟踪；不移植其跨时间步梯度合并、自定义VJP或LayerNorm，外部加速结果不代表本项目性能。

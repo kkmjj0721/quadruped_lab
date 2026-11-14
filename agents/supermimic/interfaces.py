@@ -35,7 +35,7 @@ class AlgorithmSpec:
                     self.observation_dim, self.privileged_dim, self.history_length)
         if any(value <= 0 for value in positive) or min(self.context_dim, self.memory_dim, self.command_dim) < 0:
             raise ValueError("Invalid algorithm dimensions")
-        if not self.semantic_id or self.model_id != "supermimic_moe_velocity_v1":
+        if not self.semantic_id or self.model_id not in ("supermimic_moe_velocity_v1", "supermimic_visual_foothold_v2"):
             raise ValueError("Unsupported or missing algorithm semantic identifier")
 
     @property

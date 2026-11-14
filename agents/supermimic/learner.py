@@ -2,13 +2,12 @@
 """内容：拟合物理模型与价值目标，以想象回报和真实速度监督更新策略。"""
 
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict
+from dataclasses import replace
 import math
 
 import torch
 from torch import nn
 
-from .buffer import Seed
 from .compilation import compile_kernel
 from .config import ExecutionConfig
 from .imagine import Imagination
@@ -57,7 +56,7 @@ class Learner:
 
     def __init__(self, task, actor, model, critic, config, execution=None):
         self.task, self.actor, self.model, self.critic, self.config = task, actor, model, critic, config
-        self.execution = ExecutionConfig(**asdict(execution if execution is not None else ExecutionConfig()))
+        self.execution = replace(execution) if execution is not None else ExecutionConfig()
         self._device_counts = torch.zeros(4, dtype=torch.int64, device=next(model.parameters()).device)
         self.reset_policy_optimizers()
         self.model_optimizer = self._make_optimizer("model")
@@ -209,7 +208,7 @@ class Learner:
                 for start in range(0, batch, self.execution.imag_microbatch):
                     end = min(start + self.execution.imag_microbatch, batch)
                     weight = (end - start) / batch
-                    part = Seed(seed.state.index(slice(start, end)), seed.history[start:end])
+                    part = seed.index(slice(start, end))
                     data = self.imagination.rollout(part)
                     targets = self.imagination.lambda_returns(data)
                     control_loss = -data.objective.mean()

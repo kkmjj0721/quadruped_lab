@@ -89,14 +89,10 @@ class StudentMoEEncoder(nn.Module):
         return self.normalization(encoded[:, :self.latent_dim]), encoded[:, self.latent_dim:], weights
 
 
-class MoeActor(nn.Module):
-    """盲本体历史编码为潜特征与机身线速度，再与当前帧拼接输出动作。
+class HistoryActor(nn.Module):
+    """复用本体历史布局、双路归一化及策略参数接口，编码器由具体策略装配。"""
 
-    历史与当前帧使用两套独立归一化统计；速度保持m/s量纲，
-    与潜特征一同保留策略目标的梯度，并由真实状态提供速度监督。
-    """
-
-    def __init__(self, spec, config, observation_term_dims):
+    def __init__(self, spec, observation_term_dims, latent_dim):
         super().__init__()
         if (not observation_term_dims or any(not isinstance(width, int) or isinstance(width, bool) or width < 1
                                             for width in observation_term_dims)
@@ -105,16 +101,12 @@ class MoeActor(nn.Module):
         self.observation_dim = spec.observation_dim
         self.history_length = spec.history_length
         self.action_dim = spec.action_dim
-        self.latent_dim = config.moe_latent_dim
+        self.latent_dim = latent_dim
         self.velocity_dim = 3
         self.history_order = "frame_major_oldest_first"
         self.input_order = "latent_body_velocity_current_frame"
         self.normalizer = RunningNorm(self.observation_dim * self.history_length)
         self.frame_normalizer = RunningNorm(self.observation_dim)
-        self.encoder = StudentMoEEncoder(
-            config.moe_expert_num, self.observation_dim * self.history_length, tuple(config.moe_hidden),
-            self.latent_dim)
-        self.actor = Mlp([self.latent_dim + self.velocity_dim + self.observation_dim, *config.actor_hidden, self.action_dim])
 
     def policy_normalizers(self):
         """导出与播放校验需要检查的归一化模块。"""
@@ -129,7 +121,7 @@ class MoeActor(nn.Module):
         return history if history.dim() == 3 else history.reshape(-1, self.history_length, self.observation_dim)
 
     def flatten_history(self, history: Tensor) -> Tensor:
-        """外部历史按帧排列（旧到新）；展平后即专家的逐帧输入布局。"""
+        """外部历史按帧排列（旧到新）；展平后即估计器的逐帧输入布局。"""
         return self.framed(history).reshape(-1, self.observation_dim * self.history_length)
 
     @torch.no_grad()
@@ -152,6 +144,17 @@ class MoeActor(nn.Module):
         if not torch.stack([item.finite for item in statistics]).all():
             raise FloatingPointError("Normalization data contains non-finite values")
         self.apply_statistics(statistics)
+
+
+class MoeActor(HistoryActor):
+    """盲本体 MoE 同时估计潜特征与当前机身线速度，保留原有策略梯度。"""
+
+    def __init__(self, spec, config, observation_term_dims):
+        super().__init__(spec, observation_term_dims, config.moe_latent_dim)
+        self.encoder = StudentMoEEncoder(
+            config.moe_expert_num, self.observation_dim * self.history_length, tuple(config.moe_hidden),
+            self.latent_dim)
+        self.actor = Mlp([self.latent_dim + self.velocity_dim + self.observation_dim, *config.actor_hidden, self.action_dim])
 
     @torch.jit.export
     def encode(self, history: Tensor) -> tuple[Tensor, Tensor]:

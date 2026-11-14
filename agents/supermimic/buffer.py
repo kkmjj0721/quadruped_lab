@@ -16,6 +16,10 @@ class Seed:
     state: TaskState
     history: Tensor
 
+    def index(self, index):
+        """分批保留种子协议；带外感受状态的种子覆写此方法。"""
+        return Seed(self.state.index(index), self.history[index])
+
 
 @dataclass
 class Window:
