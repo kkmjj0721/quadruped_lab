@@ -4,6 +4,7 @@
     导出项目内机器人资产配置。
 """
 
+from .go1_depth.go1_depth_constants import get_go1_depth_robot_cfg
 from .go2.go2_constants import get_go2_robot_cfg
 
-__all__ = ["get_go2_robot_cfg"]
+__all__ = ["get_go1_depth_robot_cfg", "get_go2_robot_cfg"]
