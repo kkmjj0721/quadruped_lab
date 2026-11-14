@@ -14,8 +14,13 @@ MUJOCO_LOG.TXT
 # 本地测试文件与产物
 /tests/
 
-# 本地辅助工具
-/tools/
+# 本地一次性分析、实验及参考项目调研工具；可复用工具源码正常跟踪
+/tools/analyze_supermimic_s1_s2_performance.py
+/tools/mainline_baseline_20261111/
+/tools/performance_comparison_20261109/
+/tools/reduce_sync_analysis_20261110_143625/
+/tools/reference_terrain_preview/
+/tools/stairs_video_20261112/
 
 # 本地工作文档及配图
 /docs/work/
