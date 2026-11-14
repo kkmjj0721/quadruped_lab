@@ -9,6 +9,8 @@
 """
 
 from pathlib import Path
+from functools import partial
+import math
 import sys
 
 # 直接执行文件时，从当前项目解析 src 包。
@@ -38,9 +40,14 @@ FOOT_BODY_NAMES = tuple(f"{leg}_calf" for leg in LEG_NAMES)  # 足端惯量合�
 FOOT_GEOM_NAMES = tuple(f"{leg}_foot_collision" for leg in LEG_NAMES)
 
 
-def get_spec() -> mujoco.MjSpec:
-    """保留 XML 几何与相机参数，仅把包围光心的相机壳分至独立渲染组。"""
+def get_spec(*, width: int = 64, height: int = 64) -> mujoco.MjSpec:
+    """保留 XML 几何及名义视场，将相机转换为等价的显式内参表示。"""
     spec = mujoco.MjSpec.from_file(str(GO1_DEPTH_XML))
+    camera = spec.camera(DEPTH_CAMERA_NAME)
+    focal = 0.5 / math.tan(math.radians(camera.fovy) / 2)
+    camera.sensor_size = (width / height, 1.0)
+    camera.focal_length = (focal, focal)
+    camera.resolution = (width, height)
     # 光心位于该实心碰撞盒内部；深度相机排除第 4 组，其余机身仍保留自遮挡。
     # geom.group 仅控制渲染分组，不改变相机壳的物理碰撞位掩码与接触材料。
     spec.geom(DEPTH_CAMERA_HOUSING_GEOM_NAME).group = 4
@@ -91,7 +98,7 @@ def get_go1_depth_robot_cfg(go1_cfg: Go1DepthCfg | None = None) -> EntityCfg:
             joint_vel={".*": 0.0},
         ),
         collisions=(_make_collision_cfg(cfg.collision),),
-        spec_fn=get_spec,
+        spec_fn=partial(get_spec, width=cfg.sensors.depth.width, height=cfg.sensors.depth.height),
         articulation=EntityArticulationInfoCfg(
             actuators=tuple(_make_actuator_cfg(cfg.control, name) for name in ("hip", "thigh", "calf")),
             soft_joint_pos_limit_factor=cfg.control.soft_joint_pos_limit_factor,

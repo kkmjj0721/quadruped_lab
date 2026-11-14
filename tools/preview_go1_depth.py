@@ -41,6 +41,7 @@ def build_scene(terrain_name: str, difficulty: float):
     import mujoco
     from src.assets.robots.go1_depth import get_go1_depth_robot_cfg
     from src.config.go1_depth import Go1DepthCfg
+    from src.terrain.vision import make_vision_terrain_cfg
 
     cfg = Go1DepthCfg()
     spec = get_go1_depth_robot_cfg(cfg).build().spec
@@ -73,7 +74,7 @@ def build_scene(terrain_name: str, difficulty: float):
                                       stone_height_variation=0.0, stone_size_variation=0.0,
                                       displacement_range=0.0, floor_depth=0.8, platform_width=0.6, border_width=0.0)
         else:
-            terrain = cfg.terrain.generator["sub_terrains"][terrain_name]
+            terrain = make_vision_terrain_cfg().sub_terrains[terrain_name]
         spec.worldbody.add_body(name="terrain", pos=(0.8, -terrain.size[1] / 2, 0))
         output = terrain.function(difficulty, spec, np.random.default_rng(cfg.env.seed))
         # 上游部分生成器通过输出元数据返回颜色，需要在直接装配时应用。

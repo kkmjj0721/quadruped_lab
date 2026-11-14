@@ -22,11 +22,11 @@ from src.tasks.locomotion.go2_supermimic.rl.deployment import export_checkpoint
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path, help="SuperMimic model checkpoint such as model_1000.pt")
-    parser.add_argument("--output-dir", type=Path, required=True, help="Directory receiving policy_<N>.{pt,onnx,json}")
+    parser.add_argument("--output-dir", type=Path, required=True, help="Directory receiving the task deployment policy and metadata")
     arguments = parser.parse_args()
     checkpoint_path = arguments.checkpoint.expanduser().resolve()
-    paths = export_checkpoint(checkpoint_path, arguments.output_dir)
-    print(f"[INFO] Exported deployment policy: {Path(paths['onnx']).parent}", flush=True)
+    export_checkpoint(checkpoint_path, arguments.output_dir)
+    print(f"[INFO] Exported deployment policy: {arguments.output_dir.resolve()}", flush=True)
 
 
 if __name__ == "__main__":
