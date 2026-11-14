@@ -101,9 +101,6 @@ def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -
         lines.append(row("Training phase", "world-model only"))
     for label, key, available in (
         ("Mean world model loss", "wm_loss", model_available),
-        ("Mean depth reconstruction loss", "reconstruction", model_available),
-        ("Mean height reconstruction loss", "height_reconstruction", model_available),
-        ("Mean contrastive loss", "contrastive", model_available),
         ("Mean value loss", "critic_loss", control_available),
         ("Mean control loss", "control_loss", control_available),
         ("Mean velocity estimation loss", "velocity_loss", control_available),
