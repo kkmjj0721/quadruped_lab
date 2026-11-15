@@ -40,13 +40,14 @@ FOOT_BODY_NAMES = tuple(f"{leg}_calf" for leg in LEG_NAMES)  # 足端惯量合�
 FOOT_GEOM_NAMES = tuple(f"{leg}_foot_collision" for leg in LEG_NAMES)
 
 
-def get_spec(*, width: int = 64, height: int = 64) -> mujoco.MjSpec:
+def get_spec(*, width: int = 32, height: int = 32) -> mujoco.MjSpec:
     """保留 XML 几何及名义视场，将相机转换为等价的显式内参表示。"""
     spec = mujoco.MjSpec.from_file(str(GO1_DEPTH_XML))
     camera = spec.camera(DEPTH_CAMERA_NAME)
     focal = 0.5 / math.tan(math.radians(camera.fovy) / 2)
+    # 传感器比例匹配输出，避免 Warp 中心裁切；分别设置焦距以保留原16:9角域。
     camera.sensor_size = (width / height, 1.0)
-    camera.focal_length = (focal, focal)
+    camera.focal_length = (focal * (width / height) / (16 / 9), focal)
     camera.resolution = (width, height)
     # 光心位于该实心碰撞盒内部；深度相机排除第 4 组，其余机身仍保留自遮挡。
     # geom.group 仅控制渲染分组，不改变相机壳的物理碰撞位掩码与接触材料。

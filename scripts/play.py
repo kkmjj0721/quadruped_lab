@@ -129,6 +129,30 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
     checkpoint = _resolve_checkpoint(cfg)
     configure_torch_backends()
     device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+    if task_id.startswith("Unitree-Go1-Depth-SuperMimic-"):
+        from src.tasks.locomotion.go1_depth.rl.playback import make_playback
+
+        env, policy = make_playback(task_id, checkpoint_file=checkpoint, agent=cfg.agent,
+                                    num_envs=cfg.num_envs or 1, device=device,
+                                    render_mode="rgb_array" if cfg.video else None,
+                                    video_height=cfg.video_height, video_width=cfg.video_width,
+                                    no_terminations=cfg.no_terminations)
+        try:
+            if cfg.video:
+                class DepthVideoRecorder(VideoRecorder):
+                    """显式转发深度和本体历史观测给查看器。"""
+
+                    def get_observations(self):
+                        return self._wrapped_env.get_observations()
+
+                directory = checkpoint.parent if checkpoint is not None else Path("outputs/go1_depth_play")
+                env = DepthVideoRecorder(env, video_folder=directory / "videos" / "play",
+                                         step_trigger=lambda step: step == 0, video_length=cfg.video_length,
+                                         disable_logger=True)
+            run_viewer(env, policy, cfg, device)
+        finally:
+            env.close()
+        return
     if supermimic_task(task_id):
         _run_supermimic(task_id, cfg, checkpoint, device)
         return
@@ -190,6 +214,10 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
 def main() -> None:
     """按任务协议分派，SuperMimic不经过PPO注册表。"""
     task_argument = sys.argv[1] if len(sys.argv) > 1 else None
+    if task_argument is not None and task_argument.startswith("Unitree-Go1-Depth-SuperMimic-"):
+        cfg = tyro.cli(PlayConfig, args=sys.argv[2:], prog=f"{sys.argv[0]} {task_argument}", config=mjlab.TYRO_FLAGS)
+        run_play(task_argument, cfg)
+        return
     if supermimic_task(task_argument):
         cfg = tyro.cli(PlayConfig, args=sys.argv[2:], prog=f"{sys.argv[0]} {task_argument}", config=mjlab.TYRO_FLAGS)
         run_play(task_argument, cfg)
@@ -202,11 +230,12 @@ def main() -> None:
     tasks = list_tasks()
     if len(sys.argv) == 1 or sys.argv[1] in ("-h", "--help"):
         from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
+        from src.tasks.locomotion.go1_depth.cli import TASK_MODES as DEPTH_TASK_MODES
 
         print(f"usage: {sys.argv[0]} TASK [OPTIONS]")
         print(f"Run '{sys.argv[0]} TASK --help' for playback options.")
         print("Available tasks:")
-        for task in sorted(set(tasks) | set(TASK_MODES)):
+        for task in sorted(set(tasks) | set(TASK_MODES) | set(DEPTH_TASK_MODES)):
             print(f"  {task}")
         return
 
