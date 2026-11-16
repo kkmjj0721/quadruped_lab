@@ -40,7 +40,9 @@ FOOT_BODY_NAMES = tuple(f"{leg}_calf" for leg in LEG_NAMES)  # 足端惯量合�
 FOOT_GEOM_NAMES = tuple(f"{leg}_foot_collision" for leg in LEG_NAMES)
 
 
-def get_spec(*, width: int = 32, height: int = 32) -> mujoco.MjSpec:
+def get_spec(
+    *, width: int = Go1DepthCfg.sensors.depth.width, height: int = Go1DepthCfg.sensors.depth.height,
+) -> mujoco.MjSpec:
     """保留 XML 几何及名义视场，将相机转换为等价的显式内参表示。"""
     spec = mujoco.MjSpec.from_file(str(GO1_DEPTH_XML))
     camera = spec.camera(DEPTH_CAMERA_NAME)

@@ -108,7 +108,10 @@ def _resolve_checkpoint(cfg: PlayConfig) -> Path | None:
 
 def _run_supermimic(task_id: str, cfg: PlayConfig, checkpoint: Path | None, device: str) -> None:
     """只装配任务侧播放接口、可选录像和查看器。"""
-    from src.tasks.locomotion.go2_supermimic.rl.playback import make_playback_env
+    if task_id.startswith("Unitree-Go1-Depth-SuperMimic-"):
+        from src.tasks.locomotion.go1_depth.playback import make_playback_env
+    else:
+        from src.tasks.locomotion.go2_supermimic.rl.playback import make_playback_env
 
     env, policy = make_playback_env(
         task_id, checkpoint_file=checkpoint, agent=cfg.agent, num_envs=cfg.num_envs, device=device,
@@ -129,7 +132,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
     checkpoint = _resolve_checkpoint(cfg)
     configure_torch_backends()
     device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
-    if supermimic_task(task_id):
+    if task_id.startswith("Unitree-Go1-Depth-SuperMimic-") or supermimic_task(task_id):
         _run_supermimic(task_id, cfg, checkpoint, device)
         return
 
@@ -190,7 +193,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
 def main() -> None:
     """按任务协议分派，SuperMimic不经过PPO注册表。"""
     task_argument = sys.argv[1] if len(sys.argv) > 1 else None
-    if supermimic_task(task_argument):
+    if (task_argument is not None and task_argument.startswith("Unitree-Go1-Depth-SuperMimic-")) or supermimic_task(task_argument):
         cfg = tyro.cli(PlayConfig, args=sys.argv[2:], prog=f"{sys.argv[0]} {task_argument}", config=mjlab.TYRO_FLAGS)
         run_play(task_argument, cfg)
         return
@@ -202,11 +205,12 @@ def main() -> None:
     tasks = list_tasks()
     if len(sys.argv) == 1 or sys.argv[1] in ("-h", "--help"):
         from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
+        from src.tasks.locomotion.go1_depth.training import TASK_MODES as DEPTH_TASK_MODES
 
         print(f"usage: {sys.argv[0]} TASK [OPTIONS]")
         print(f"Run '{sys.argv[0]} TASK --help' for playback options.")
         print("Available tasks:")
-        for task in sorted(set(tasks) | set(TASK_MODES)):
+        for task in sorted(set(tasks) | set(TASK_MODES) | set(DEPTH_TASK_MODES)):
             print(f"  {task}")
         return
 

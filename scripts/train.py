@@ -213,6 +213,11 @@ def supermimic_task(task_id: str | None) -> bool:
 def main() -> None:
     """先解析任务 ID，再根据该任务配置解析命令行覆盖。"""
     # 提前读取任务ID，避免任何分支都导入PPO注册表。
+    if len(sys.argv) > 1 and sys.argv[1].startswith("Unitree-Go1-Depth-SuperMimic-"):
+        from src.tasks.locomotion.go1_depth.cli import train_main
+
+        train_main(sys.argv[1], sys.argv[2:])
+        return
     if supermimic_task(sys.argv[1] if len(sys.argv) > 1 else None):
         from src.tasks.locomotion.go2_supermimic.cli import train_main
 
@@ -226,10 +231,11 @@ def main() -> None:
     tasks = list_tasks()
     if len(sys.argv) == 1 or sys.argv[1] in {"-h", "--help"}:
         from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
+        from src.tasks.locomotion.go1_depth.training import TASK_MODES as DEPTH_TASK_MODES
 
         print(f"usage: {sys.argv[0]} <TASK> [OPTIONS]")
         print(f"Run '{sys.argv[0]} <TASK> --help' for task-specific options.")
-        print("Available tasks:\n  " + "\n  ".join(sorted([*tasks, *TASK_MODES])))
+        print("Available tasks:\n  " + "\n  ".join(sorted([*tasks, *TASK_MODES, *DEPTH_TASK_MODES])))
         return
     task_id, remaining_args = tyro.cli(
         tyro.extras.literal_type_from_choices(tasks),
