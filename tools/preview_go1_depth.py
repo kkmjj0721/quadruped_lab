@@ -76,7 +76,7 @@ def build_scene(terrain_name: str, difficulty: float):
         else:
             terrain = make_vision_terrain_cfg().sub_terrains[terrain_name]
         spec.worldbody.add_body(name="terrain", pos=(0.8, -terrain.size[1] / 2, 0))
-        output = terrain.function(difficulty, spec, np.random.default_rng(cfg.env.seed))
+        output = terrain.function(difficulty, spec, np.random.default_rng(0))
         # 上游部分生成器通过输出元数据返回颜色，需要在直接装配时应用。
         for geometry in output.geometries:
             if geometry.geom is not None and geometry.color is not None:
