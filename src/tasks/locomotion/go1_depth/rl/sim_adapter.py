@@ -1,0 +1,291 @@
+# Copyright (c) 2026-2027 zh
+"""
+内容：
+    从真实Go1环境提取reset前转移，统一任务记忆、奖励、课程与部分reset时序。
+"""
+
+from __future__ import annotations
+
+import torch
+from mjlab.envs import ManagerBasedRlEnv
+
+from agents.depth_supermimic.interfaces import DepthEnvStep
+
+from src.assets.robots.go1_depth.go1_depth_constants import ROOT_BODY_NAME
+
+from ..env_cfg import make_go1_depth_env_cfg, resolve_go1_depth_cfg
+from ..sensors.depth_camera import DepthCameraState, camera_intrinsics, clone_frame, world_to_optical
+from ..sensors.depth_renderer import SelectedDepthRenderer
+from ..mdp.curriculums import CommandCurriculum, TerrainCurriculum
+from ..mdp.state_spec import (
+    ACTION_DIM, COMMAND_TIMER, CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION,
+    CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY, JOINT_NAMES,
+    COMMAND_OVERRIDE,
+)
+from ..mdp.reference_task import Go1DepthTaskModel
+from ..mdp.reference_state import ANGULAR_BODY, CONTEXT_COM
+from ..mdp.terrains import PlaneSurface, TerrainMap, TerrainSurface
+
+
+class Go1DepthAdapter:
+    """连接原生仿真与CollectionEnv，任务规则由本目录的MDP实现。
+
+    单步顺序为物理推进、复制终态、计算任务奖励／失败、更新真实课程、重置结束行。
+    final_state保留重置前状态，next_state提供下一次决策输入。
+    """
+
+    # ---------- 初始化 ----------
+
+    def __init__(self, cfg=None, *, device="cpu", play=False, render_mode=None,
+                 video_height=None, video_width=None, no_terminations=False, num_envs=None):
+        self.cfg = resolve_go1_depth_cfg(cfg, play=play)
+        if num_envs is not None:
+            self.cfg.env.num_envs = num_envs
+        self.play = play
+        self.no_terminations = no_terminations
+        self.map = TerrainMap(self.cfg.terrain)
+        env_cfg = make_go1_depth_env_cfg(self.cfg, terrain_map=self.map)
+        if play:
+            env_cfg.terminations = {}
+        if no_terminations:
+            env_cfg.terminations = {}
+        if video_height is not None:
+            env_cfg.viewer.height = video_height
+        if video_width is not None:
+            env_cfg.viewer.width = video_width
+        self.raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
+        try:
+            self.device = next(iter(self.raw_env.scene.entities.values())).data.joint_pos.device
+            self.num_envs = self.raw_env.num_envs
+            self.robot = self.raw_env.scene["robot"]
+            if tuple(self.robot.joint_names) != JOINT_NAMES:
+                raise ValueError("Go1 asset joint order differs from the task specification")
+            action = self.raw_env.action_manager.get_term("joint_pos")
+            if tuple(action.target_names) != JOINT_NAMES:
+                raise ValueError("Go1 action order differs from the task specification")
+            terrain = self.raw_env.scene.terrain
+            self.map.bind(terrain.terrain_origins)
+            self.surface = (PlaneSurface(device=self.device) if self.cfg.terrain.mode == "flat" else
+                            TerrainSurface.from_model(self.raw_env.sim.mj_model, self.device, terrain_map=self.map))
+            self.task = Go1DepthTaskModel(self.cfg, self.robot.data.default_joint_pos[0].clone(),
+                                  self.robot.data.soft_joint_pos_limits[0].clone(), self.surface, device=self.device)
+            self.task.bind_env(self.raw_env)
+            self.command_curriculum = CommandCurriculum(self.cfg.commands, self.map.family_names, self.device)
+            self.terrain_curriculum = TerrainCurriculum(
+                self.map, self.num_envs, self.cfg.terrain.max_init_level, enabled=self.cfg.terrain.curriculum,
+                episode_length_s=self.cfg.env.episode_length_s, device=self.device)
+            if not self.map.plane:
+                self.terrain_curriculum.family_ids.copy_(terrain.terrain_types)
+            self.context_version = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+            self._state = None
+            self._play_commands = None
+            self.last_metrics = {}
+            self.camera = DepthCameraState(self.cfg.sensors.depth, self.num_envs, device=self.device,
+                                           noisy=self.cfg.noise.add_noise)
+            self._camera_id = self.raw_env.sim.mj_model.camera(f"robot/{self.cfg.sensors.depth.camera_name}").id
+            self._intrinsics = camera_intrinsics(self.raw_env.sim.mj_model, self._camera_id,
+                                                 self.cfg.sensors.depth.width, self.cfg.sensors.depth.height,
+                                                 device=self.device)
+            self.depth_renderer = SelectedDepthRenderer(self.raw_env, self.cfg)
+            self._episode_reward_sums = {name: torch.zeros(self.num_envs, device=self.device)
+                                         for name in self.cfg.to_dict()["reward"]["scales"]}
+        except BaseException:
+            self.raw_env.close()
+            raise
+
+    @property
+    def state(self):
+        """当前决策态；采集器需要修改时应先调用 get_state 复制。"""
+        return self._state
+
+    @property
+    def frame(self):
+        return self.camera.frame
+
+    def _capture_frame(self, ids):
+        data = self.raw_env.sim.data
+        projection = world_to_optical(data.cam_xpos[:, self._camera_id], data.cam_xmat[:, self._camera_id])
+        self.camera.capture(self.depth_renderer.capture(ids), projection, self._intrinsics, ids)
+
+    @property
+    def step_dt(self):
+        return self.raw_env.step_dt
+
+    def get_state(self):
+        """提供当前决策态的独立副本，避免评估修改采集状态。"""
+        if self._state is None:
+            raise RuntimeError("Reset the Go1 adapter before reading its state")
+        return self._state.detached_clone()
+
+    @torch.no_grad()
+    def set_play_commands(self, commands=None):
+        """播放时固定各环境的速度命令，None恢复原命令采样；不改变训练配置。"""
+        if not self.play:
+            raise RuntimeError("Command overrides are available only during playback")
+        if commands is None:
+            self._play_commands = None
+            if self._state is not None:
+                self._state.memory[:, COMMAND_OVERRIDE] = 0
+            return
+        values = torch.as_tensor(commands, dtype=torch.float32, device=self.device)
+        if values.shape == (3,):
+            values = values.unsqueeze(0).expand(self.num_envs, -1)
+        if values.shape != (self.num_envs, 3) or not torch.isfinite(values).all():
+            raise ValueError("Playback commands must be finite [3] or [num_envs,3]")
+        self._play_commands = values.clone()
+        if self._state is not None:
+            self._state.command.copy_(self._play_commands)
+            self._state.memory[:, COMMAND_OVERRIDE] = 1
+
+    # ---------- 回合重置 ----------
+
+    def _set_origins(self, ids):
+        if self.cfg.terrain.mode == "flat":
+            return
+        terrain = self.raw_env.scene.terrain
+        self.terrain_curriculum.sample(ids)
+        terrain.env_origins[ids] = self.terrain_curriculum.origins(ids)
+        # 同步原生可视化元数据，课程计算仍只有当前adapter这一处。
+        terrain.terrain_levels[ids] = self.terrain_curriculum.levels[ids] + self.map.row_offset
+        terrain.terrain_types[ids] = self.terrain_curriculum.family_ids[ids] + self.map.rings
+
+    def _context(self, ids):
+        context = torch.zeros((ids.numel(), CONTEXT_DIM), dtype=torch.float32, device=self.device)
+        foot = self.raw_env.sim.mj_model.geom("robot/FL_foot_collision").id
+        friction = self.raw_env.sim.model.geom_friction
+        context[:, CONTEXT_FRICTION] = (friction[ids, foot, 0] if friction.ndim == 3 else friction[foot, 0])
+        base = self.raw_env.sim.mj_model.body(f"robot/{ROOT_BODY_NAME}").id
+        ipos = self.raw_env.sim.model.body_ipos
+        nominal = torch.as_tensor(self.raw_env.sim.mj_model.body_ipos[base].copy(), device=self.device)
+        context[:, CONTEXT_COM] = (ipos[ids, base] if ipos.ndim == 3 else ipos[base]) - nominal
+        context[:, CONTEXT_ENCODER_BIAS] = self.robot.data.encoder_bias[ids]
+        context[:, CONTEXT_ORIGIN] = self.raw_env.scene.env_origins[ids]
+        bounds, probability = self.command_curriculum.parameters(self.terrain_curriculum.family_ids[ids])
+        context[:, CONTEXT_RANGES] = bounds
+        context[:, CONTEXT_ZERO_PROBABILITY] = probability.squeeze(-1)
+        return context
+
+    def _reset_rows(self, ids):
+        self._set_origins(ids)
+        self.raw_env.reset(env_ids=ids)
+        physical = self.task.read_physical(self.raw_env)
+        context = self._context(ids)
+        reset_state = self.task.initialize_state(physical[ids].clone(), context)
+        if self._play_commands is not None:
+            reset_state.command.copy_(self._play_commands[ids])
+            reset_state.memory[:, COMMAND_OVERRIDE] = 1
+        if self._state is None:
+            self._state = reset_state.detached_clone()
+        else:
+            for name in ("physical", "memory", "command", "context"):
+                getattr(self._state, name)[ids] = getattr(reset_state, name)
+        self.terrain_curriculum.reset(ids, self.robot.data.root_link_pos_w[ids, :2])
+        self.context_version[ids] += 1
+        self._capture_frame(ids)
+        for values in self._episode_reward_sums.values():
+            values[ids] = 0
+
+    @torch.no_grad()
+    def reset(self, env_ids=None):
+        """外部reset不计晋级，保留已加载的课程阶段与逻辑等级。"""
+        ids = torch.arange(self.num_envs, device=self.device) if env_ids is None else env_ids
+        if self._state is None and env_ids is not None:
+            raise RuntimeError("Initialize all environments before a partial reset")
+        if ids.numel() == 0:
+            return self._state.detached_clone()
+        self._reset_rows(ids)
+        self.last_metrics = {}
+        return self._state.detached_clone()
+
+    # ---------- 真实转移 ----------
+
+    @torch.no_grad()
+    def step(self, actions):
+        if self._state is None:
+            raise RuntimeError("Reset the Go1 adapter before stepping")
+        if actions.shape != (self.num_envs, ACTION_DIM) or actions.dtype != torch.float32 or actions.device != self.device:
+            raise ValueError("Go1 actions must be float32 [N,12] on the environment device")
+        if not torch.isfinite(actions).all():
+            raise FloatingPointError("Go1 actions contain non-finite values")
+        before = self._state.detached_clone()
+        due_ids = self.camera.tick()
+        versions = self.context_version.clone()
+        _, _, _, raw_truncated, _ = self.raw_env.step(actions)
+        if due_ids.numel():
+            self._capture_frame(due_ids)
+        physical = self.task.read_physical(self.raw_env).clone()
+        if not torch.isfinite(physical).all():
+            raise FloatingPointError("Go1 physical state contains non-finite values")
+        sensor = self.raw_env.scene["feet_ground_contact"].data
+        final = self.task.advance(before, actions, physical,
+                                  contact_times=(sensor.current_air_time.clone(), sensor.current_contact_time.clone())).detached_clone()
+        if self._play_commands is not None:
+            final.command.copy_(self._play_commands)
+        terminated = (torch.zeros(self.num_envs, dtype=torch.bool, device=self.device) if self.no_terminations
+                      else self.task.hard_termination(final))
+        truncated = raw_truncated.clone()
+        terms = self.task.reward_terms(before, actions, final, terminated.float())
+        reward = (self.step_dt * sum(getattr(self.cfg.reward.scales, name) * value
+                                     for name, value in terms.items())).detach().clone()
+        for name, value in terms.items():
+            self._episode_reward_sums[name].add_(self.step_dt * getattr(self.cfg.reward.scales, name) * value)
+        velocity = self.task.tracking_velocity(final)
+        linear_error = velocity[:, :2] - before.command[:, :2]
+        angular_error = velocity[:, 2] - before.command[:, 2]
+        if not self.play:
+            self.command_curriculum.control_steps += 1
+            self.terrain_curriculum.control_steps = self.raw_env.common_step_counter
+        final_frame = clone_frame(self.camera.frame)
+        foot_positions = self.robot.data.site_pos_w[:, self.task.foot_ids].clone()
+        contacts = (sensor.found > 0).clone()
+        self._state = final.detached_clone()
+        done_ids = (terminated | truncated).nonzero().flatten()
+        # 对齐HIM：先用已执行的旧命令结算课程，再累计本步，结束行随后清零。
+        self.terrain_curriculum.update(self.raw_env, done_ids, before.command)
+        self.terrain_curriculum.advance(before.command, self.robot.data.heading_w, self.step_dt)
+        episode_metrics = {}
+        if done_ids.numel():
+            # 对齐MjLab：提前结束也除以最大回合时长，包含结束步的贡献。
+            episode_metrics = {f"episode_reward/{name}": self._episode_reward_sums[name][done_ids].mean()
+                               / self.cfg.env.episode_length_s for name in terms}
+            self._reset_rows(done_ids)
+        self.last_metrics = {f"reward/{name}": value.mean() for name, value in terms.items()}
+        self.last_metrics.update(episode_metrics)
+        self.last_metrics.update(terrain_level=self.terrain_curriculum.levels.float().mean(),
+                                 command_stage_iteration=float(self.command_curriculum.iteration),
+                                 tracking_linear_mse=linear_error.square().sum(-1).mean(),
+                                 tracking_angular_mse=angular_error.square().mean(),
+                                 action_rms=actions.square().mean().sqrt(),
+                                 base_height=self.task.physical_features(final)[:, 0].mean(),
+                                 # 参考 train.py:406 的诊断量：机体系偏航角速度超过 3 rad/s 的比例，用于发现打转。
+                                 fast_yaw=(final.physical[:, ANGULAR_BODY][:, 2].abs() > 3.0).float().mean())
+        self.last_metrics["camera_renders"] = self.depth_renderer.rendered_frames.float().mean()
+        return DepthEnvStep(final, self._state.detached_clone(), reward, terminated, truncated, versions,
+                            final_frame, clone_frame(self.camera.frame), foot_positions, contacts, actions.detach().clone())
+
+    # ---------- 课程持久化与资源释放 ----------
+
+    def curriculum_state_dict(self):
+        return {"command": self.command_curriculum.state_dict(), "terrain": self.terrain_curriculum.state_dict()}
+
+    def load_curriculum_state_dict(self, state):
+        self.command_curriculum.load_state_dict(state["command"])
+        self.terrain_curriculum.load_state_dict(state["terrain"])
+        self.raw_env.common_step_counter = self.command_curriculum.control_steps
+
+    def resume_progress(self, iteration):
+        """参考continue_run仅恢复公共进度，不伪装成恢复各环境物理状态。"""
+        self.raw_env.common_step_counter = iteration
+        self.command_curriculum.control_steps = iteration
+        self.terrain_curriculum.control_steps = iteration
+
+    def close(self):
+        self.raw_env.close()
+
+
+def make_go1_depth_env(cfg=None, device="cpu", *, play=False, render_mode=None,
+                       video_height=None, video_width=None, no_terminations=False, num_envs=None):
+    """创建低频真实深度、原生转移与本地 Go1 数学任务的采集环境。"""
+    return Go1DepthAdapter(cfg, device=device, play=play, render_mode=render_mode,
+                           video_height=video_height, video_width=video_width,
+                           no_terminations=no_terminations, num_envs=num_envs)

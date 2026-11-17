@@ -73,6 +73,7 @@ docs/        # 安装与任务用法
 ## 文档与许可
 
 - [SuperMimic 任务指南](docs/go2_supermimic.md)：配置、续训、评估与导出。
+- [Go1 深度 SuperMimic](docs/go1_depth_supermimic.md)：四足视觉查询、单路MLP与4096环境训练。
 - [算法说明](agents/README.md)：算法组件、接口与来源。
 - [Go2 配置](src/config/go2/)：机器人、控制与任务参数。
 

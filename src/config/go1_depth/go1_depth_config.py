@@ -17,7 +17,7 @@ from src.config.base.base_config import BaseConfig
 class Go1DepthCfg(BaseConfig):
     """统一声明资产、相机与训练参数，各实例之间的可变数据相互独立。"""
 
-    algorithm = "depth_rssm"
+    algorithm = "depth_query"
 
     @dataclass
     class algo(DepthSuperMimicConfig):
@@ -254,7 +254,6 @@ class Go1DepthCfg(BaseConfig):
             smoothness = -0.01
             stand_still = -2.0
             stand_still_joint_vel_l2 = -0.1  # 仅在站立命令下约束关节速度，权重是待训练验证的初值。
-            stuck = -1.0  # 沿用 WMP：有 x 轴指令但机身 x 轴速度过低时惩罚。
             foot_slip = -0.1
             joint_acc_l2 = -3.0e-7
             stumble = -0.1
@@ -271,14 +270,17 @@ class Go1DepthCfg(BaseConfig):
         save_interval = 10000
         log_interval = 1
         metric_interval = 10
-        imag_microbatch = 4096
-        critic_microbatch = 32768
+        detailed_timing = False
+        timing_interval = 1
+        imag_microbatch = 2048  # RTX5090实测可完整执行总想象批量，保留32步反传。
+        critic_microbatch = 16384
         wm_compile = True  # 完整八步监督编译；正确性对照可显式关闭。
         fused_adam = True
-        cuda_graph = True  # 三类更新固定地址捕获，有限RSSM准备、感知监督和相机采集在图外。
-        wm_bf16 = True  # 仅MLP矩阵，物理状态/返回/CNN/GRU仍FP32。
+        cuda_graph = True  # 三类更新固定地址捕获，原始帧重编码、感知监督和相机采集在图外。
+        wm_bf16 = True  # 仅MLP矩阵，物理状态、返回、CNN与查询仍FP32。
         actor_bf16 = True
         critic_bf16 = True
+        replay_history_storage = "frames"
         enable_control_updates = True
         standing_zero_noise = True
 
