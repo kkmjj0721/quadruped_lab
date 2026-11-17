@@ -17,7 +17,7 @@ from src.config.base.base_config import BaseConfig
 class Go1DepthCfg(BaseConfig):
     """统一声明资产、相机与训练参数，各实例之间的可变数据相互独立。"""
 
-    algorithm = "depth_cnn_gru"
+    algorithm = "depth_rssm"
 
     @dataclass
     class algo(DepthSuperMimicConfig):
@@ -275,7 +275,7 @@ class Go1DepthCfg(BaseConfig):
         critic_microbatch = 32768
         wm_compile = True  # 完整八步监督编译；正确性对照可显式关闭。
         fused_adam = True
-        cuda_graph = True  # 三类更新固定地址捕获，完整前缀准备与相机采集在图外。
+        cuda_graph = True  # 三类更新固定地址捕获，有限RSSM准备、感知监督和相机采集在图外。
         wm_bf16 = True  # 仅MLP矩阵，物理状态/返回/CNN/GRU仍FP32。
         actor_bf16 = True
         critic_bf16 = True
