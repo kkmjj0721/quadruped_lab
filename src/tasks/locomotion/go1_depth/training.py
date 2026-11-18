@@ -44,6 +44,7 @@ def _integer(value, minimum: int, name: str) -> None:
 def _validate_arguments(task_id: str, args: DepthTrainConfig) -> None:
     if task_id not in TASK_MODES:
         raise ValueError(f"Unknown Go1 depth SuperMimic task: {task_id}")
+    _integer(args.cpu_threads, 1, "cpu_threads")
     for name in ("max_iterations", "save_interval", "log_interval"):
         value = getattr(args, name)
         if value is not None:
@@ -126,6 +127,16 @@ def _resolve_device(requested: str) -> str:
 
 # ---------- 运行快照与训练装配 ----------
 
+def configure_cpu_threads(threads: int) -> None:
+    """在任务装配前设置真实CPU算子线程，并统一后续子进程的线程环境。"""
+    # 统一入口已导入torch，必须调用运行时API；只补环境变量不会改变现有线程池。
+    torch.set_num_threads(threads)
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ[name] = str(threads)
+    print(f"[INFO] CPU threads configured: intraop={torch.get_num_threads()}, "
+          f"interop={torch.get_num_interop_threads()}", flush=True)
+
+
 def _run_origin(task_id: str, args: DepthTrainConfig, device: str, resume: Path | None, source: Path | None) -> dict:
     """收集命令、依赖版本与代码状态，供事件文本和params快照共同使用。"""
     root = Path(__file__).resolve().parents[4]
@@ -142,6 +153,9 @@ def _run_origin(task_id: str, args: DepthTrainConfig, device: str, resume: Path 
             "arguments": asdict(args), "device": device, "resume_from": resume,
             "task_config_source": source, "command": list(sys.argv), "python": sys.version,
             "torch": torch.__version__,
+            "cpu_threads": {"intraop": torch.get_num_threads(), "interop": torch.get_num_interop_threads(),
+                            "worker_environment": {name: os.environ.get(name) for name in
+                                                   ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")}},
             "triton_libdevice_path": os.environ.get("TRITON_LIBDEVICE_PATH"),
             "packages": {name: version(name) for name in ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "tensorboard")},
             "workspace": workspace}
@@ -151,6 +165,7 @@ def launch_training(task_id: str, args: DepthTrainConfig) -> Path:
     """调用既有runner训练至目标轮次，周期保存模型和ONNX并返回独立产物目录。"""
     entry_started = time.perf_counter()
     _validate_arguments(task_id, args)
+    configure_cpu_threads(args.cpu_threads)
     cfg, resume, source = _resolve_task_config(task_id, args)
     runtime = cfg.runner
     device = _resolve_device(args.device)

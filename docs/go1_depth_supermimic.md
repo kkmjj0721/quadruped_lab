@@ -5,11 +5,13 @@
 从项目根目录启动单设备训练，默认4096个环境：
 
 ```bash
-OMP_NUM_THREADS=1 .venv/bin/python -u scripts/train.py Unitree-Go1-Depth-SuperMimic-Rough \
+.venv/bin/python -u scripts/train.py Unitree-Go1-Depth-SuperMimic-Rough \
   --device cuda:0 --num-envs 4096 --experiment-name go1_depth_query
 ```
 
 平地任务为 `Unitree-Go1-Depth-SuperMimic-Flat`。参数集中在 `src/config/go1_depth/go1_depth_config.py`，命令行覆盖见任务后 `--help`。终端按Go2格式输出英文训练摘要，默认每10轮汇总指标；TensorBoard事件与检查点位于 `logs/supermimic/go1_depth_query/<运行标识>/`。感知损失位于 `perception/`，查询损失为 `perception/read_loss`。远程日志查看遵循工作区TensorBoard指南。
+
+入口默认将PyTorch CPU张量算子线程数设为1，避免CPU帧池分块索引的线程开销；可用 `--cpu-threads 2` 显式覆盖。启动终端打印实际 `intraop`/`interop`，`params/run.yaml`记录实际值与后续子进程线程环境。当前已初始化的OpenBLAS线程池不由该环境记录保证改变；`interop`保持原值。线程覆盖属于进程执行参数，不改变任务hash或检查点语义。
 
 策略输入为五帧47维本体历史和四个实际相机刷新帧；相机64×64、10Hz，控制50Hz。CNN产生四帧共64个16维token，FPM预测四足下一次触地的航向系XY，查询读取视觉后由单路 `323→512→256→128→12` MLP输出动作。没有MoE或GRU。部署网络398020个参数。
 

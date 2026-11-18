@@ -161,13 +161,13 @@ class Go1DepthCfg(BaseConfig):
             joint_vel = 1.5  # rad/s。
 
     class terrain:
-        """Ri-5036 HIM地形；难度采用Go1 HIM行走表现课程。"""
+        """Ri-5036 HIM地形移除20厘米踏面楼梯；难度采用Go1 HIM行走表现课程。"""
 
         mode = "rough"
         seed = None
         patch_size_m = (8.0, 8.0)
         core_rows = 6
-        num_cols = 20  # 沿用参考配置；MjLab课程模式按十种子地形实际生成十列。
+        num_cols = 8  # MjLab课程模式每种子地形各占一列。
         outer_flat_width_m = 20.0
         max_init_level = 0
         curriculum = True

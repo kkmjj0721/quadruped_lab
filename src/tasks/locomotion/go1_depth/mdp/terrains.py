@@ -20,7 +20,7 @@ from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 
 
 def reference_generator(cfg) -> TerrainGeneratorCfg:
-    """复现legged_wbc_mjlab@4eb8fcf的ri_5036_him地形生成配置。"""
+    """基于legged_wbc_mjlab@4eb8fcf的ri_5036_him地形，按用户要求移除20厘米踏面楼梯。"""
     from mjlab.terrains import BoxRandomGridTerrainCfg
     from mjlab.terrains.config import ROUGH_TERRAINS_CFG
 
@@ -37,10 +37,11 @@ def reference_generator(cfg) -> TerrainGeneratorCfg:
         platform_width=2.4, border_width=0.25, holes=False,
         merge_similar_heights=False, height_merge_threshold=0.02, max_merge_distance=3,
     )
-    stair_dimensions = ((0.18, 1.9), (0.20, 1.75), (0.22, 1.65), (0.25, 1.5))
+    # 保留原编号，避免剩余踏面对应的地形名称改变。
+    stair_dimensions = ((0, 0.18, 1.9), (2, 0.22, 1.65), (3, 0.25, 1.5))
     for name in ("pyramid_stairs", "pyramid_stairs_inv"):
         base = terrain.sub_terrains.pop(name)
-        for index, (width, border_width) in enumerate(stair_dimensions):
+        for index, width, border_width in stair_dimensions:
             terrain.sub_terrains[f"{name}_{index}"] = replace(
                 base, step_height_range=(0.05, 0.18), step_width=width,
                 border_width=border_width, platform_width=2.499999, holes=False, proportion=0.05,
@@ -64,7 +65,7 @@ def clean_look(terrain):
 
 
 class TerrainMap:
-    """Ri-5036 HIM的十种地形各占一列，六行按生成器difficulty递增。"""
+    """筛选后的八种地形各占一列，六行按生成器difficulty递增。"""
 
     def __init__(self, cfg):
         self.cfg = deepcopy(cfg)

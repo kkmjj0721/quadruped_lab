@@ -20,6 +20,8 @@ class DepthTrainConfig:
 
     device: str = "cuda:0"
     """单个运行设备，例如cpu或cuda:0。"""
+    cpu_threads: int = 1
+    """训练进程CPU张量算子线程数；默认1，避免帧池小块索引产生过量线程开销。"""
     num_envs: int | None = None
     """覆盖并行环境数量；训练至少使用两个并行环境。"""
     seed: int | None = None

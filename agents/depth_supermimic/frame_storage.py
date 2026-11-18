@@ -102,8 +102,9 @@ class FrameStorage:
                             frame.world_to_camera[rows].to(device="cpu", dtype=torch.float32),
                             frame.intrinsics[rows].to(device="cpu", dtype=torch.float32))
         for block, selected, offsets in self._groups(ids):
+            selected, offsets = selected.numpy(), offsets.numpy()
             for name, value in vars(host).items():
-                getattr(block, name)[offsets] = value[selected]
+                getattr(block, name).numpy()[offsets] = value.numpy()[selected]
         self.refcounts[ids] = 1
         return ids
 
@@ -138,10 +139,11 @@ class FrameStorage:
         if not fields:
             return result
         for block, selected, offsets in self._groups(flat):
+            selected, offsets = selected.numpy(), offsets.numpy()
             for name in fields:
                 value = getattr(result, name)
                 target = value.reshape(flat.numel(), *value.shape[ids.ndim:])
-                target.index_copy_(0, selected, getattr(block, name).index_select(0, offsets))
+                target.numpy()[selected] = getattr(block, name).numpy()[offsets]
         return result
 
     def sample_pixels(self, ids: Tensor, linear: Tensor):
