@@ -166,13 +166,13 @@ class Go1DepthCfg(BaseConfig):
             joint_vel = 1.5  # rad/s。
 
     class terrain:
-        """Ri-5036 HIM地形移除20厘米踏面楼梯；难度采用Go1 HIM行走表现课程。"""
+        """Ri-5036 HIM 地形与垫脚石，按 Go1 HIM 行走表现升降难度。"""
 
         mode = "rough"
         seed = None
         patch_size_m = (8.0, 8.0)
         core_rows = 6
-        num_cols = 8  # MjLab课程模式每种子地形各占一列。
+        num_cols = 8  # 沿用旧配置字段，实际列数由课程地形种类决定。
         outer_flat_width_m = 20.0
         max_init_level = 0
         curriculum = True
@@ -251,7 +251,7 @@ class Go1DepthCfg(BaseConfig):
             action_rate_l2 = -0.1
             joint_pos_limits = -10.0
             body_ang_vel = -0.05
-            foot_gait = 0.5
+            foot_gait = 0.3
             feet_air_time = 0.2
             pose = 0.5
             lin_vel_z = -2.0
@@ -261,7 +261,7 @@ class Go1DepthCfg(BaseConfig):
             stand_still_joint_vel_l2 = -0.1  # 仅在站立命令下约束关节速度，权重是待训练验证的初值。
             foot_slip = -0.1
             joint_acc_l2 = -3.0e-7
-            stumble = -0.1
+            stumble = -0.5
             joint_torques_l2 = -2.0e-5
             leg_collision = -1.0
             angular_momentum = -0.025

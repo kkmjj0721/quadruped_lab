@@ -11,6 +11,8 @@
 
 平地任务为 `Unitree-Go1-Depth-SuperMimic-Flat`。参数集中在 `src/config/go1_depth/go1_depth_config.py`，命令行覆盖见任务后 `--help`。终端按Go2格式输出英文训练摘要，默认每10轮汇总指标；TensorBoard事件与检查点位于 `logs/supermimic/go1_depth_query/<运行标识>/`。感知损失位于 `perception/`，查询损失为 `perception/read_loss`。远程日志查看遵循工作区TensorBoard指南。
 
+粗糙任务默认地图有 6 档难度和 9 类地形。垫脚石位于最后一列，机器人从中央平台出生。课程逐档缩小石面，增大柱间间隙与石面高度变化。单个地块为 8×8 米，核心区外四周各有 20 米平地。
+
 入口默认将PyTorch CPU张量算子线程数设为1，避免CPU帧池分块索引的线程开销；可用 `--cpu-threads 2` 显式覆盖。启动终端打印实际 `intraop`/`interop`，`params/run.yaml`记录实际值与后续子进程线程环境。当前已初始化的OpenBLAS线程池不由该环境记录保证改变；`interop`保持原值。线程覆盖属于进程执行参数，不改变任务hash或检查点语义。
 
 策略输入为五帧47维本体历史和四个实际相机刷新帧；相机64×64、10Hz，控制50Hz。CNN产生四帧共64个16维token，FPM预测四足下一次触地的航向系XY，查询读取视觉后由单路 `323→512→256→128→12` MLP输出动作。没有MoE或GRU。部署网络398020个参数。
@@ -28,6 +30,8 @@
 ```
 
 `max-iterations`表示目标总轮数。默认热启动只加载参数和匹配的优化器，轮数从零开始；`continue-run True`恢复累计计数与课程，重新建立仿真和回放。`--reset-critic True`从恢复轮次起冻结Actor以预热新Critic。Go2或历史RSSM检查点不能直接用于此网络。新版相机改变了策略输入分布，不支持加载旧 5 m 检查点（包括热启动）；请使用新版默认配置重新训练。
+
+从新增垫脚石前的粗糙地图检查点迁移时，使用热启动。`continue-run True` 要求地图几何匹配。
 
 每次保存同步生成 `policy.pt`、`policy.onnx` 和 `policy.json`。导出只包含CNN、FPM、查询和Actor；显式输入 `history[B,5,47]`、`depth_frames[B,4,1,64,64]`，输出未缩放动作 `[B,12]`。历史按从旧到新排列。重置时重复首个本体帧与深度帧，相机每5控制步追加新帧。导出前向每次重编码输入的四帧，调用端可另行维护新帧编码缓存；导出本身不实现该缓存。动作按配置的关节缩放映射到PD目标。
 

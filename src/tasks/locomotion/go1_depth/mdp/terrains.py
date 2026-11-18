@@ -20,14 +20,14 @@ from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 
 
 def reference_generator(cfg) -> TerrainGeneratorCfg:
-    """基于legged_wbc_mjlab@4eb8fcf的ri_5036_him地形，按用户要求移除20厘米踏面楼梯。"""
-    from mjlab.terrains import BoxRandomGridTerrainCfg
+    """装配筛选后的 Ri-5036 HIM 地形和 Go1 垫脚石。"""
+    from mjlab.terrains import BoxRandomGridTerrainCfg, BoxSteppingStonesTerrainCfg
     from mjlab.terrains.config import ROUGH_TERRAINS_CFG
 
     terrain = deepcopy(ROUGH_TERRAINS_CFG)
     terrain.seed = cfg.seed
     terrain.size = tuple(cfg.patch_size_m)
-    terrain.num_rows, terrain.num_cols = cfg.core_rows, cfg.num_cols
+    terrain.num_rows = cfg.core_rows
     terrain.border_width = cfg.outer_flat_width_m
     terrain.curriculum = True
     for name in ("hf_pyramid_slope", "hf_pyramid_slope_inv", "wave_terrain", "random_rough"):
@@ -47,6 +47,13 @@ def reference_generator(cfg) -> TerrainGeneratorCfg:
                 border_width=border_width, platform_width=2.499999, holes=False, proportion=0.05,
             )
     terrain.sub_terrains["flat"].proportion = 0.06941176470588235
+    # 默认地块的中心距约 0.83 米，石面缩小时名义间隙从约 0.09 增至 0.23 米。
+    terrain.sub_terrains["stepping_stones"] = BoxSteppingStonesTerrainCfg(
+        proportion=0.05, stone_size_range=(0.60, 0.74), stone_distance_range=(0.09, 0.23),
+        stone_height=0.0, stone_height_variation=0.05, stone_size_variation=0.02,
+        displacement_range=0.02, floor_depth=0.75, platform_width=2.4, border_width=0.25,
+    )
+    terrain.num_cols = len(terrain.sub_terrains)
     return terrain
 
 
@@ -65,7 +72,7 @@ def clean_look(terrain):
 
 
 class TerrainMap:
-    """筛选后的八种地形各占一列，六行按生成器difficulty递增。"""
+    """粗糙模式下每种地形各占一列，难度沿行递增。"""
 
     def __init__(self, cfg):
         self.cfg = deepcopy(cfg)
