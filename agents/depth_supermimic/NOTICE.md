@@ -14,7 +14,7 @@
 
 `optim.py`派生自 [PartyMimic@69c53621](https://github.com/Roboparty/PartyMimic/blob/69c53621e6394f3c5dd7a923d0a93dcfcd1fb8eb/src/partymimic/optim.py#L64)。策略所有Linear权重用Muon，其余参数用Adam；物理模型仅中间Linear权重用Muon；Critic与感知模块各用独立Adam。感知Adam的参数仅包含CNN、Decoder、视觉prior和FPM；read损失只更新查询与Actor优化器，策略阶段冻结感知与物理权重并保留输入导数。
 
-图捕获前完成编译与预热；原始深度CPU存储、标签准备与编码放在图外，固定形状物理采样、物理/策略/价值更新保持Go2图路径。图内视觉prior每控制步全批计算、仅相机刷新时写入token，不能将该实现描述成只计算10Hz。输入/输出精度、检查点格式与Go2相互独立：`supermimic_depth_query_v1`。
+图捕获前完成编译与预热；原始深度CPU存储、标签准备与编码放在图外，固定形状物理采样、物理/策略/价值更新保持Go2图路径。图内视觉prior每控制步全批计算、仅相机刷新时写入token，不能将该实现描述成只计算10Hz。输入/输出精度、检查点格式与Go2相互独立：`supermimic_depth_query_v2` 使用新的相机协议，不加载旧版检查点。
 
 参考来源、固定提交、差异与验证范围详见本地工作设计；正式用法见[Go1深度训练](../../docs/go1_depth_supermimic.md)。继续训练恢复网络、优化器和累计计数及任务课程；与Go2已有语义一致，真实回放、仿真、RNG与旧预热状态重新开始。
 

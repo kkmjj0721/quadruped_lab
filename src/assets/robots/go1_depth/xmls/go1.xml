@@ -47,8 +47,8 @@
       <geom pos="0.08 0 0.08" type="box" size="0.045 0.045 0.025" material="orange" class="visual" />
       <geom name="payload_box_collision" pos="0.08 0 0.08" type="box" size="0.045 0.045 0.025" class="collision" />
       <site name="imu" pos="-0.01592 -0.06659 -0.00617" group="5" />
+      <camera name="depth_camera" pos="0.28 0 0.12" xyaxes="0 -1 0 0.3420201433 0 0.9396926208" fovy="58" />
       <body name="depth_camera" pos="0.28 0 0.12" euler="0 0.349066 0">
-        <camera name="depth_camera" pos="0 0 0" euler="1.57 -1.57 0" fovy="58" />
         <geom mesh="d435_simplified" euler="-1.57 1.57 0" material="silver" class="visual" />
       </body>
       <body name="FL_hip" pos="0.1881 0.04675 0">

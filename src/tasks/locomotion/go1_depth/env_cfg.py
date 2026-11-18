@@ -17,11 +17,13 @@ from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.viewer import ViewerConfig
 
+from agents.depth_supermimic.interfaces import DEPTH_MAX_METERS
 from src.assets.robots.go1_depth.go1_depth_constants import get_go1_depth_robot_cfg, ROOT_BODY_NAME
 from src.config.go1_depth.go1_depth_config import Go1DepthCfg
 
 from .mdp.state_spec import FOOT_NAMES
 from .mdp.terrains import TerrainMap
+from .sensors.depth_camera import randomize_depth_camera_mount
 
 
 def validate_config(cfg: Go1DepthCfg) -> None:
@@ -53,8 +55,13 @@ def validate_config(cfg: Go1DepthCfg) -> None:
     if critic_dimensions not in ((234, 234), (258, 258), (259, 259), (262, 262)):
         raise ValueError("The Go1 state layout requires 262 critic observations or the legacy 234/258/259 layouts")
     depth = cfg.sensors.depth
-    if (depth.width, depth.height, depth.period, depth.near, depth.far) != (64, 64, 5, 0., 5.):
-        raise ValueError("The depth query protocol requires 64x64, period=5, near=0m and far=5m")
+    if (depth.width, depth.height, depth.period, depth.near, depth.far) != (64, 64, 5, 0., DEPTH_MAX_METERS):
+        raise ValueError("The depth query protocol requires 64x64, period=5, near=0m and far=2m")
+    if not math.isfinite(depth.position_noise) or depth.position_noise < 0:
+        raise ValueError("Depth camera position noise must be finite and nonnegative")
+    for bounds in (depth.roll_range, depth.pitch_range, depth.yaw_range):
+        if len(bounds) != 2 or not all(math.isfinite(angle) for angle in bounds) or bounds[0] > bounds[1]:
+            raise ValueError("Depth camera angle ranges must be finite and ordered")
     if not math.isfinite(depth.noise_std) or depth.noise_std < 0:
         raise ValueError("Depth Gaussian noise must be finite and nonnegative")
     if not math.isfinite(depth.dropout_probability) or not 0 <= depth.dropout_probability <= 1:
@@ -168,6 +175,8 @@ def make_go1_depth_env_cfg(
 
     # 只使用MjLab环境层的通用重置原语；任务课程与记忆重置由adapter协调。
     events = {
+        "depth_camera_mount": EventTermCfg(func=randomize_depth_camera_mount, mode="startup",
+                                           params={"cfg": cfg.sensors.depth}),
         "reset_root": EventTermCfg(
             func=envs_mdp.reset_root_state_uniform,
             mode="reset",

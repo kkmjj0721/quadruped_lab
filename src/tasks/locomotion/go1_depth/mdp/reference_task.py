@@ -93,8 +93,7 @@ class Go1DepthTaskModel:
         version = "v7" if self.him_rewards else "v6" if self.leg_collision else "v5" if self.force_rewards else "v4"
         self.spec = AlgorithmSpec(self.physical_dim + 4, self.physical_dim - 45, 12, sum(self.observation_term_dims),
                                   cfg.env.num_critic_obs, 26, MEMORY_DIM, 3,
-                                  f"go1_depth_velocity_{version}_residual_fk_v1:" + self.semantic_hash,
-                                  model_id="supermimic_depth_query_v1")
+                                  f"go1_depth_velocity_{version}_residual_fk_v1:" + self.semantic_hash)
 
     def _semantic_config(self) -> dict:
         """以当前任务配置建立语义指纹，运行时预算不改变任务定义。"""

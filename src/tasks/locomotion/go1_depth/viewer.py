@@ -18,7 +18,7 @@ class _PolicyDepthImage:
         key = (env_idx, capture)
         if key == self.key:
             return False
-        gray = np.rint(depth.cpu().numpy() * 255).astype(np.uint8)
+        gray = np.rint(np.clip(depth.cpu().numpy() + 0.5, 0, 1) * 255).astype(np.uint8)
         # 固定灰度量程，最近邻放大保留原像素。
         enlarged = gray.repeat(3, axis=0).repeat(3, axis=1)
         self.rgb = enlarged[..., None].repeat(3, axis=2)
@@ -52,7 +52,7 @@ class Go1DepthViserViewer(ViserPlayViewer):
         far = env.adapter.cfg.sensors.depth.far
         with self._server.gui.add_folder("Go1 深度相机", order=0):
             self._depth_panel = self._server.gui.add_image(
-                self._depth_image.rgb, label=f"最新深度帧（0–{far:g} m，近黑远白）", format="png",
+                self._depth_image.rgb, label=f"最新深度帧（0–{far:g} m，近黑远白，无回波为白）", format="png",
             )
             self._server.gui.add_markdown("落足点颜色 · 左前红 / 右前青 / 左后黄 / 右后紫")
 

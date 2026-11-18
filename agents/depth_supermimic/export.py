@@ -14,7 +14,7 @@ from .policy import Mlp
 
 
 class DepthDeployment(nn.Module):
-    """显式输入四幅原始深度和五帧本体，调用者维护相机时钟与重置。"""
+    """显式输入四幅已编码的深度帧和五帧本体，调用者负责米制预处理与帧时序。"""
 
     def __init__(self, actor, perception):
         super().__init__()
@@ -44,12 +44,12 @@ def export_policy(actor, perception, directory, *, iteration, metadata=None):
     if module.actor.normalizer.count <= 0 or (module.actor.normalizer.var < 0).any():
         raise ValueError("Invalid policy normalization statistics")
     information = {
-        **(metadata or {}), "format": "supermimic_depth_query_policy_v1", "iteration": iteration,
+        **(metadata or {}), "format": "supermimic_depth_query_policy_v2", "iteration": iteration,
         "inputs": {"history": [None, 5, 47], "depth_frames": [None, 4, 1, 64, 64]},
         "outputs": {"actions": [None, 12]}, "dtype": "float32", "actor_hidden": [512, 256, 128],
         "history_order": "oldest_to_newest", "depth_order": "oldest_to_newest_camera_refresh",
         "reset": "repeat_initial_proprioception_and_depth_frame",
-        "depth_processing": "optical_z_meters_clamp_0_5_then_divide_5",
+        "depth_processing": "optical_z_meters_finite_gt_0_clamp_0_2_divide_2_minus_0_5_else_plus_0_5",
         "control_hz": 50, "camera_hz": 10, "camera_period_control_steps": 5,
         "action_semantics": "unscaled_joint_position_offsets", "action_transform": "identity",
         "training_only": ["world_model", "visual_prior", "critic", "decoder"],

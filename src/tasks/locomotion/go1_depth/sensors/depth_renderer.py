@@ -11,7 +11,6 @@ import torch
 import warp as wp
 from mjlab.sensor.sensor_context import SensorContext
 from mujoco_warp._src.render import _make_cast_ray
-from mujoco_warp._src.types import MJ_MAXVAL
 
 from src.config.go1_depth.go1_depth_config import make_go1_depth_camera_cfg
 
@@ -48,6 +47,7 @@ def _depth_kernel(geom_ray_types, cull_backfaces, use_fast_math):
         flex_bvh_id: wp.array[wp.uint64],
         flex_group_root: wp.array2d[int],
         depth: wp.array2d[float],
+        far: float,
     ):
         row, pixel = wp.tid()
         world = world_ids[row]
@@ -58,7 +58,7 @@ def _depth_kernel(geom_ray_types, cull_backfaces, use_fast_math):
             geom_xpos, geom_xmat, flexvert_xpos, bvh_id, group_root[world], world,
             bvh_ngeom, bvh_nflexgeom, enabled_geom_ids, mesh_bvh_id, hfield_bvh_id,
             flex_geom_flexid, flex_geom_edgeid, flex_bvh_id, flex_group_root,
-            camera_position[world, camera_id], world_ray, float(MJ_MAXVAL), wp.static(cull_backfaces),
+            camera_position[world, camera_id], world_ray, far / (-local_ray[2]), wp.static(cull_backfaces),
         )
         value = float(0.0)
         if geom != -1:
@@ -102,7 +102,7 @@ class SelectedDepthRenderer:
                 data.flexvert_xpos, data.cam_xpos, data.cam_xmat, self.sensor.camera_idx, rc.ray,
                 rc.bvh_id, rc.group_root, rc.bvh_ngeom, rc.bvh_nflexgeom, rc.enabled_geom_ids,
                 rc.mesh_bvh_id, rc.hfield_bvh_id, rc.flex_geom_flexid, rc.flex_geom_edgeid,
-                rc.flex_bvh_id, rc.flex_group_root, rc.depth_data,
+                rc.flex_bvh_id, rc.flex_group_root, rc.depth_data, self.cfg.far,
             ], device=sim.wp_device)
         self.rendered_frames[env_ids] += 1
         return self.context.get_depth(self.sensor.camera_idx)

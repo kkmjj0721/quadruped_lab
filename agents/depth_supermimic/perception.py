@@ -31,7 +31,7 @@ class DepthDecoder(nn.Module):
             nn.ConvTranspose2d(8, 1, 4, 2, 1), nn.Sigmoid())
 
     def forward(self, tokens):
-        return self.layers(tokens.transpose(1, 2).reshape(-1, 16, 4, 4))
+        return self.layers(tokens.transpose(1, 2).reshape(-1, 16, 4, 4)) - 0.5
 
 
 class Perception(nn.Module):

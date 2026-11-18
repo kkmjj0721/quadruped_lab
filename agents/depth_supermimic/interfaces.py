@@ -14,6 +14,10 @@ import torch
 from torch import Tensor
 
 
+DEPTH_MAX_METERS = 2.0
+DEPTH_QUERY_MODEL_ID = "supermimic_depth_query_v2"
+
+
 @dataclass(frozen=True)
 class AlgorithmSpec:
     """维度之外，semantic_id必须标识坐标系、布局、动作及任务语义。"""
@@ -28,14 +32,14 @@ class AlgorithmSpec:
     command_dim: int
     semantic_id: str
     history_length: int = 5
-    model_id: str = "supermimic_depth_query_v1"
+    model_id: str = DEPTH_QUERY_MODEL_ID
 
     def __post_init__(self):
         positive = (self.state_dim, self.delta_dim, self.action_dim,
                     self.observation_dim, self.privileged_dim, self.history_length)
         if any(value <= 0 for value in positive) or min(self.context_dim, self.memory_dim, self.command_dim) < 0:
             raise ValueError("Invalid algorithm dimensions")
-        if not self.semantic_id or self.model_id != "supermimic_depth_query_v1":
+        if not self.semantic_id or self.model_id != DEPTH_QUERY_MODEL_ID:
             raise ValueError("Unsupported or missing algorithm semantic identifier")
 
     @property

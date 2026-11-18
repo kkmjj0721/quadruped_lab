@@ -57,12 +57,12 @@ class DepthReplay(Replay):
 
     def __init__(self, spec, num_envs: int, capacity: int, device, task, history_storage="frames", *,
                  device_sampling=False, depth_shape=(1, 64, 64), frame_window=4,
-                 action_history_length=5, depth_scale=5.0):
-        if frame_window != 4 or action_history_length != 5 or depth_scale <= 0:
-            raise ValueError("Depth replay requires four frames, five actions and a positive depth scale")
+                 action_history_length=5):
+        if frame_window != 4 or action_history_length != 5:
+            raise ValueError("Depth replay requires four frames and five actions")
         super().__init__(spec, num_envs, capacity, device, history_storage, device_sampling=device_sampling)
         self.task, self.frame_window = task, frame_window
-        self.action_history_length, self.depth_scale = action_history_length, depth_scale
+        self.action_history_length = action_history_length
         self.frames = FrameStorage(num_envs * (2 * capacity + frame_window + 2), depth_shape)
         self.frame_ids = torch.full((capacity, num_envs, frame_window), -1, dtype=torch.long)
         self.refresh_ids = torch.full((capacity, num_envs), -1, dtype=torch.long)
@@ -187,8 +187,7 @@ class DepthReplay(Replay):
             read_targets = state.physical.new_zeros(rows.shape[0], 4, self.frame_window * 16)
             read_valid = torch.zeros(rows.shape[0], 4, dtype=torch.bool, device=self.device)
         else:
-            read_targets, read_valid = project_read_targets(future_world, future_valid, self.frames, frame_ids,
-                                                           images, depth_scale=self.depth_scale)
+            read_targets, read_valid = project_read_targets(future_world, future_valid, self.frames, frame_ids, images)
             read_targets, read_valid = read_targets.to(self.device), read_valid.to(self.device)
         seed = RawDepthSeed(state, self._history_at(rows, absolute), images.noisy,
                             self._actions_at(rows, absolute), self.ages[slots, rows, None].float(),

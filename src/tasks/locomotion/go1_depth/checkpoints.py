@@ -10,7 +10,7 @@ import torch
 
 from agents.depth_supermimic.config import DepthSuperMimicConfig
 from agents.depth_supermimic.export import DepthDeployment
-from agents.depth_supermimic.interfaces import AlgorithmSpec
+from agents.depth_supermimic.interfaces import AlgorithmSpec, DEPTH_QUERY_MODEL_ID
 from agents.depth_supermimic.perception import Perception
 from agents.depth_supermimic.policy import DepthActor
 
@@ -35,7 +35,7 @@ def load_playback_source(task_id, checkpoint_file):
         raise ValueError("Trained depth playback requires a checkpoint")
     path = Path(checkpoint_file).expanduser().resolve()
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if checkpoint.get("format") != "supermimic_depth_query_v1":
+    if checkpoint.get("format") != DEPTH_QUERY_MODEL_ID:
         raise ValueError("Incompatible Go1 depth checkpoint format")
     settings, wrapped = read_settings(path.parent / "task_config.json")
     if not wrapped:

@@ -7,8 +7,24 @@ from dataclasses import fields
 import math
 
 import torch
+from mjlab.managers.event_manager import requires_model_fields
+from mjlab.utils.lab_api.math import quat_from_euler_xyz, quat_mul
 
 from agents.depth_supermimic.interfaces import DepthFrame
+
+
+@requires_model_fields("cam_pos", "cam_quat")
+def randomize_depth_camera_mount(env, env_ids, *, cfg):
+    """按环境采样一次机身系外参；回合重置不修改相机模型。"""
+    camera_id = env.sim.mj_model.camera(f"robot/{cfg.camera_name}").id
+    count = env.num_envs
+    position = env.sim.model.cam_pos
+    position[:, camera_id] += torch.empty_like(position[:, camera_id]).uniform_(-cfg.position_noise, cfg.position_noise)
+    roll, pitch, yaw = (torch.empty(count, device=env.device).uniform_(*map(math.radians, bounds))
+                        for bounds in (cfg.roll_range, cfg.pitch_range, cfg.yaw_range))
+    mount = quat_from_euler_xyz(roll, pitch, yaw)
+    frame = mount.new_tensor((0.5, 0.5, -0.5, -0.5)).expand_as(mount)
+    env.sim.model.cam_quat[:, camera_id] = quat_mul(mount, frame)
 
 
 def clone_frame(frame: DepthFrame) -> DepthFrame:
@@ -75,14 +91,14 @@ class DepthCameraState:
         """只更新指定行；clean 的真实有效掩码不受人工 dropout 影响。"""
         depth = metric_depth[ids].permute(0, 3, 1, 2)
         valid = torch.isfinite(depth) & (depth > self.cfg.near) & (depth <= self.cfg.far)
-        clean = torch.where(valid, depth / self.cfg.far, 0.)
+        clean = torch.where(valid, depth / self.cfg.far - 0.5, 0.5)
         noisy = depth
         if self.noisy:
             if self.cfg.noise_std:
                 noisy = noisy + torch.randn_like(noisy) * self.cfg.noise_std
             if self.cfg.dropout_probability:
-                noisy = noisy * (torch.rand_like(noisy) >= self.cfg.dropout_probability)
-        noisy = torch.where(valid, noisy.clamp(self.cfg.near, self.cfg.far) / self.cfg.far, 0.)
+                noisy = torch.where(torch.rand_like(noisy) >= self.cfg.dropout_probability, noisy, self.cfg.far)
+        noisy = torch.where(valid, noisy.clamp(self.cfg.near, self.cfg.far) / self.cfg.far - 0.5, 0.5)
         self.frame.clean[ids], self.frame.noisy[ids], self.frame.valid[ids] = clean, noisy, valid
         self.frame.world_to_camera[ids] = world_to_camera[ids]
         self.frame.intrinsics[ids] = intrinsics.expand(self.frame.age.shape[0], -1, -1)[ids]

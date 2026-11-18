@@ -77,8 +77,9 @@ class Go1DepthRunner(DepthSuperMimicRunner):
         task_state = checkpoint.get("go1_task", {})
         if "curriculum" not in task_state:
             raise ValueError("Go1 depth checkpoint is missing task metadata")
-        if continue_run and (checkpoint.get("spec") != asdict(self.spec)
-                             or task_state.get("spec_hash") != self.spec.hash):
+        if continue_run and checkpoint.get("format") == self.spec.model_id and (
+            checkpoint.get("spec") != asdict(self.spec) or task_state.get("spec_hash") != self.spec.hash
+        ):
             raise ValueError("Go1 task dynamics changed; use an explicit warm start instead of continue_run")
         super().load(path, continue_run=continue_run, reset_critic=reset_critic)
         if continue_run:

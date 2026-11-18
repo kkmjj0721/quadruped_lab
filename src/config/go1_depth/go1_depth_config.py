@@ -10,6 +10,7 @@ import math
 from mjlab.sensor import CameraSensorCfg
 
 from agents.depth_supermimic.config import DepthSuperMimicConfig
+from agents.depth_supermimic.interfaces import DEPTH_MAX_METERS
 
 from src.config.base.base_config import BaseConfig
 
@@ -87,14 +88,18 @@ class Go1DepthCfg(BaseConfig):
             width = 64
             height = 64
             data_types = ("depth",)
-            enabled_geom_groups = (0, 3)
+            enabled_geom_groups = (0,)
             use_textures = False
             use_shadows = False
             period = 5  # 每5个50Hz控制步拍摄一帧，重置后首帧立即拍摄。
             near = 0.0
-            far = 5.0
+            far = DEPTH_MAX_METERS
             noise_std = 0.03  # 米制高斯噪声；固定量程归一化之前添加。
             dropout_probability = 0.1
+            position_noise = 0.01
+            roll_range = (-2., 2.)
+            pitch_range = (15., 25.)
+            yaw_range = (-2., 2.)
 
     class env:
         """固定任务协议的维度、环境规模及回合预算。"""

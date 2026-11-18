@@ -7,6 +7,7 @@ import torch
 from torch import Tensor
 
 from .frame_storage import FrameStorage, StoredFrames
+from .interfaces import DEPTH_MAX_METERS
 
 
 def strictly_future_contact_indices(onsets: Tensor, done: Tensor, available: Tensor):
@@ -24,7 +25,7 @@ def strictly_future_contact_indices(onsets: Tensor, done: Tensor, available: Ten
 
 def project_read_targets(world_points: Tensor, future_valid: Tensor, frames: FrameStorage,
                          frame_ids: Tensor, projection: StoredFrames, *,
-                         depth_scale: float, visibility_tolerance=0.08, token_grid=4):
+                         visibility_tolerance=0.08, token_grid=4):
     """未来足端site投影到历史相机，经视野、clean有效像素和遮挡检查后归一化。
 
     每帧4×4 token采用半token标准差的高斯软标签。人工深度掉点不参与
@@ -44,9 +45,9 @@ def project_read_targets(world_points: Tensor, future_valid: Tensor, frames: Fra
     pixel = uv.round().long()
     linear = pixel[..., 1].clamp(0, height - 1) * width + pixel[..., 0].clamp(0, width - 1)
     clean, mask = frames.sample_pixels(frame_ids, linear)
-    clean = clean.float()
-    visible = (inside & mask & torch.isfinite(clean)
-               & ((clean * depth_scale - z).abs() <= visibility_tolerance + z.abs() * .01)
+    metric_depth = (clean.float() + 0.5) * DEPTH_MAX_METERS
+    visible = (inside & mask & torch.isfinite(metric_depth)
+               & ((metric_depth - z).abs() <= visibility_tolerance + z.abs() * .01)
                & future_valid[:, None])
     coordinates = (uv + .5) * uv.new_tensor((token_grid / width, token_grid / height)) - .5
     axis = torch.arange(token_grid, dtype=torch.float32)

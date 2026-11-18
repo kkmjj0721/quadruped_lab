@@ -30,7 +30,6 @@ GO1_DEPTH_XML: Path = SRC_PATH / "assets" / "robots" / "go1_depth" / "xmls" / "g
 ROOT_BODY_NAME = "base_link"
 IMU_SITE_NAME = "imu"
 DEPTH_CAMERA_NAME = "depth_camera"
-DEPTH_CAMERA_HOUSING_GEOM_NAME = "base2_collision"
 
 # 顺序与本模型的 MJCF 关节、足端定义一致；不能直接套用其他机器人任务的排列。
 LEG_NAMES = ("FL", "FR", "RL", "RR")
@@ -43,17 +42,14 @@ FOOT_GEOM_NAMES = tuple(f"{leg}_foot_collision" for leg in LEG_NAMES)
 def get_spec(
     *, width: int = Go1DepthCfg.sensors.depth.width, height: int = Go1DepthCfg.sensors.depth.height,
 ) -> mujoco.MjSpec:
-    """保留 XML 几何及名义视场，将相机转换为等价的显式内参表示。"""
+    """配置 WMP 的水平视场和整数像素主点。"""
     spec = mujoco.MjSpec.from_file(str(GO1_DEPTH_XML))
     camera = spec.camera(DEPTH_CAMERA_NAME)
-    focal = 0.5 / math.tan(math.radians(camera.fovy) / 2)
-    # 传感器比例匹配输出，避免 Warp 中心裁切；分别设置焦距以保留原16:9角域。
     camera.sensor_size = (width / height, 1.0)
-    camera.focal_length = (focal * (width / height) / (16 / 9), focal)
+    focal = camera.sensor_size[0] / (2 * math.tan(math.radians(camera.fovy) / 2))
+    camera.focal_length = (focal, focal)
+    camera.principal_length = (-0.5 / height, -0.5 / height)
     camera.resolution = (width, height)
-    # 光心位于该实心碰撞盒内部；深度相机排除第 4 组，其余机身仍保留自遮挡。
-    # geom.group 仅控制渲染分组，不改变相机壳的物理碰撞位掩码与接触材料。
-    spec.geom(DEPTH_CAMERA_HOUSING_GEOM_NAME).group = 4
     return spec
 
 
