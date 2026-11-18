@@ -72,14 +72,15 @@ def _validate_config(cfg: PlayConfig) -> None:
         raise ValueError("video_length must be positive when recording video.")
 
 
-def run_viewer(env, policy, cfg: PlayConfig, device: str) -> None:
+def run_viewer(env, policy, cfg: PlayConfig, device: str, *, viewer_classes=None) -> None:
     """按显示环境选择原生窗口或浏览器查看器，结束后由调用方关闭环境。"""
     viewer = cfg.viewer
     if viewer == "auto":
         has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
         viewer = "native" if has_display else "viser"
     print(f"[INFO] Playing with: device={device}, viewer={viewer}", flush=True)
-    viewer_cls = NativeMujocoViewer if viewer == "native" else ViserPlayViewer
+    classes = viewer_classes or {"native": NativeMujocoViewer, "viser": ViserPlayViewer}
+    viewer_cls = classes[viewer]
     viewer_cls(env, policy).run()
 
 
@@ -108,8 +109,12 @@ def _resolve_checkpoint(cfg: PlayConfig) -> Path | None:
 
 def _run_supermimic(task_id: str, cfg: PlayConfig, checkpoint: Path | None, device: str) -> None:
     """只装配任务侧播放接口、可选录像和查看器。"""
+    viewer_classes = None
     if task_id.startswith("Unitree-Go1-Depth-SuperMimic-"):
         from src.tasks.locomotion.go1_depth.playback import make_playback_env
+        from src.tasks.locomotion.go1_depth.viewer import Go1DepthNativeViewer, Go1DepthViserViewer
+
+        viewer_classes = {"native": Go1DepthNativeViewer, "viser": Go1DepthViserViewer}
     else:
         from src.tasks.locomotion.go2_supermimic.rl.playback import make_playback_env
 
@@ -121,7 +126,7 @@ def _run_supermimic(task_id: str, cfg: PlayConfig, checkpoint: Path | None, devi
     try:
         if cfg.no_terminations:
             print("[INFO] Terminations disabled.")
-        run_viewer(env, policy, cfg, device)
+        run_viewer(env, policy, cfg, device, viewer_classes=viewer_classes)
     finally:
         env.close()
 

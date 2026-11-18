@@ -16,9 +16,19 @@ from mjlab.utils.wrappers import VideoRecorder
 from agents.depth_supermimic.interfaces import append_history
 from src.config.go1_depth.go1_depth_config import Go1DepthCfg
 
-from .train_cfg import TASK_MODES
 from .checkpoints import build_playback_policy, load_playback_source
+from .mdp.reference_state import yaw_rotate_inverse
 from .rl.sim_adapter import Go1DepthAdapter
+from .train_cfg import TASK_MODES
+
+
+# 按策略的 FL、FR、RL、RR 顺序着色。
+_FOOT_COLORS = (
+    (1.0, 0.25, 0.25, 1.0),
+    (0.15, 0.8, 1.0, 1.0),
+    (1.0, 0.8, 0.15, 1.0),
+    (0.75, 0.35, 1.0, 1.0),
+)
 
 
 class _PlaybackTransitionAdapter(Go1DepthAdapter):
@@ -118,8 +128,9 @@ class SuperMimicVideoRecorder(VideoRecorder):
 class SuperMimicPlayEnv:
     """将任务转移转换为查看器协议；原生属性委托，重置始终经过任务adapter。"""
 
-    def __init__(self, adapter):
+    def __init__(self, adapter, model=None):
         self.adapter = adapter
+        self._model = model
         self.command_manager = _PlaybackCommandManager(adapter)
         self.reward_manager = _PlaybackRewardManager(adapter)
         self._observation = None
@@ -167,6 +178,30 @@ class SuperMimicPlayEnv:
             raise RuntimeError("Reset the SuperMimic playback environment before observing")
         self._update_commands()
         return {"observation": self._observation, "history": self._history, "depth_frames": self._depth}
+
+    def get_depth_frame(self, env_idx):
+        """读取相机采集序号和策略输入栈的最新深度帧。"""
+        capture = self.adapter.depth_renderer.rendered_frames[env_idx].item()
+        return capture, self._depth[env_idx, -1, 0]
+
+    @torch.no_grad()
+    def update_visualizers(self, visualizer):
+        self.adapter.raw_env.update_visualizers(visualizer)
+        if self._model is None:
+            return
+        idx = visualizer.env_idx
+        # 使用当前决策帧推理四足 XY，与动作前向共用同一归一化器和 FPM。
+        history = self._model.actor.normalized_history(self._history[idx:idx + 1])
+        points = self._model.fpm(history).reshape(4, 2)
+        robot = self.adapter.robot.data
+        local = torch.nn.functional.pad(points, (0, 1))
+        xy = robot.root_link_pos_w[idx, :2] + yaw_rotate_inverse(local, -robot.heading_w[idx])[:, :2]
+        # 网络预测 XY，球心沿地形表面上抬一个半径以便观察。
+        radius = 0.03
+        z = self.adapter.task.surface_height(xy) + radius
+        xyz = torch.cat((xy, z[:, None]), dim=-1).cpu().numpy()
+        for center, color in zip(xyz, _FOOT_COLORS, strict=True):
+            visualizer.add_sphere(center, radius, color)
 
     @torch.no_grad()
     def step(self, actions):
@@ -233,7 +268,7 @@ def make_playback(task_id, *, checkpoint_file=None, agent="trained", num_envs=No
         model = build_playback_policy(source, adapter) if source is not None else None
         if source is not None:
             _restore_curriculum(adapter, source.checkpoint)
-        env = SuperMimicPlayEnv(adapter)
+        env = SuperMimicPlayEnv(adapter, model)
         env.reset()
 
         @torch.no_grad()

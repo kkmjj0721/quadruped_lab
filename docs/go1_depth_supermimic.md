@@ -33,8 +33,10 @@
 
 ```bash
 .venv/bin/python scripts/play.py Unitree-Go1-Depth-SuperMimic-Rough \
-  --checkpoint-file '<运行目录>/model_1000.pt' --num-envs 1
+  --checkpoint-file '<运行目录>/model_1000.pt' --num-envs 1 --viewer viser
 ```
+
+Viser 右侧顶部的「Go1 深度相机」和 `--viewer native` 窗口左下角显示当前环境的最新策略深度帧，灰度固定为 0～5 m，近黑远白。3D 场景用红、青、黄、紫球分别显示左前、右前、左后、右后的下一次预测触地位置。策略输出航向坐标系中的 XY，标记球底与对应世界 XY 的地形表面相切。落足点随查看器的调试可视化开关显示，`--agent zero` 和 `--agent random` 可查看深度图。
 
 训练验收须显式启动，普通单元测试不启动完整训练：
 
