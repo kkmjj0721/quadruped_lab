@@ -23,6 +23,8 @@ class StoredFrames:
 
 
 _FRAME_FIELDS = ("noisy", "clean", "valid", "world_to_camera", "intrinsics")
+_FRAME_DTYPES = dict(zip(_FRAME_FIELDS, (torch.float16, torch.float16, torch.bool, torch.float32, torch.float32),
+                         strict=True))
 
 
 class FrameStorage:
@@ -35,6 +37,7 @@ class FrameStorage:
         self.chunk_size = min(chunk_size, capacity)
         self.refcounts = torch.zeros(capacity, dtype=torch.int32)
         self._chunks: list[StoredFrames] = []
+        self._staging: dict[str, Tensor] = {}
         self._free: list[int] = []
         self._next = 0
 
@@ -50,6 +53,7 @@ class FrameStorage:
     def clear(self):
         self.refcounts.zero_()
         self._chunks.clear()
+        self._staging.clear()
         self._free.clear()
         self._next = 0
 
@@ -96,14 +100,22 @@ class FrameStorage:
         ids = self._allocate(rows.numel())
         if not ids.numel():
             return ids
-        host = StoredFrames(frame.noisy[rows].to(dtype=torch.float16).cpu(),
-                            frame.clean[rows].to(dtype=torch.float16).cpu(),
-                            frame.valid[rows].to(device="cpu", dtype=torch.bool),
-                            frame.world_to_camera[rows].to(device="cpu", dtype=torch.float32),
-                            frame.intrinsics[rows].to(device="cpu", dtype=torch.float32))
+        if rows.is_cuda:
+            if not self._staging or self._staging["noisy"].shape[0] < rows.numel():
+                capacity = min(self.capacity, max(rows.numel(), frame.noisy.shape[0]))
+                self._staging = {name: torch.empty((capacity, *getattr(frame, name).shape[1:]), dtype=dtype,
+                                                   device="cpu", pin_memory=True)
+                                 for name, dtype in _FRAME_DTYPES.items()}
+            host = {name: value[:rows.numel()] for name, value in self._staging.items()}
+            for name, dtype in _FRAME_DTYPES.items():
+                host[name].copy_(getattr(frame, name)[rows].to(dtype=dtype), non_blocking=True)
+            torch.cuda.current_stream(rows.device).synchronize()
+        else:
+            host = {name: getattr(frame, name)[rows].to(device="cpu", dtype=dtype)
+                    for name, dtype in _FRAME_DTYPES.items()}
         for block, selected, offsets in self._groups(ids):
             selected, offsets = selected.numpy(), offsets.numpy()
-            for name, value in vars(host).items():
+            for name, value in host.items():
                 getattr(block, name).numpy()[offsets] = value.numpy()[selected]
         self.refcounts[ids] = 1
         return ids
